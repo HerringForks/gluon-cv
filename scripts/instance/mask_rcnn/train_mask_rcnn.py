@@ -10,6 +10,7 @@ os.environ['MXNET_EXEC_BULK_EXEC_MAX_NODE_TRAIN_FWD'] = '999'
 os.environ['MXNET_EXEC_BULK_EXEC_MAX_NODE_TRAIN_BWD'] = '25'
 os.environ['MXNET_GPU_COPY_NTHREADS'] = '1'
 os.environ['MXNET_OPTIMIZER_AGGREGATION_SIZE'] = '54'
+os.environ['MXNET_USE_FUSION'] = '0'
 
 import logging
 import time
@@ -34,16 +35,7 @@ from gluoncv.data import COCODetection, VOCDetection
 from multiprocessing import Process
 from gluoncv.model_zoo.rcnn.mask_rcnn.data_parallel import ForwardBackwardTask
 
-try:
-    import horovod.mxnet as hvd
-except ImportError:
-    hvd = None
-
-try:
-    from mpi4py import MPI
-except ImportError:
-    logging.info('mpi4py is not installed. Use "pip install --no-cache mpi4py" to install')
-    MPI = None
+import herring.mxnet as hvd
 
 
 # from mxnet import profiler
@@ -124,15 +116,15 @@ def parse_args():
                         help='Whether to use static memory allocation. Memory usage will increase.')
     parser.add_argument('--amp', action='store_true',
                         help='Use MXNet AMP for mixed precision training.')
-    parser.add_argument('--horovod', action='store_true',
-                        help='Use MXNet Horovod for distributed training. Must be run with OpenMPI. '
-                             '--gpus is ignored when using --horovod.')
+    parser.add_argument('--herring', action='store_true',
+                        help='Use MXNet Herring for distributed training. Must be run with OpenMPI. '
+                             '--gpus is ignored when using --herring.')
     parser.add_argument('--use-ext', action='store_true',
                         help='Use NVIDIA MSCOCO API. Make sure you install first')
     parser.add_argument('--executor-threads', type=int, default=1,
                         help='Number of threads for executor for scheduling ops. '
                              'More threads may incur higher GPU memory footprint, '
-                             'but may speed up throughput. Note that when horovod is used, '
+                             'but may speed up throughput. Note that when herring is used, '
                              'it is set to 1.')
     parser.add_argument('--kv-store', type=str, default='nccl',
                         help='KV store options. local, device, nccl, dist_sync, dist_device_sync, '
@@ -264,10 +256,6 @@ def parse_args():
              'For FPN network this is typically 4.')
 
     args = parser.parse_args()
-    if args.horovod:
-        if hvd is None:
-            raise SystemExit("Horovod not found, please check if you installed it correctly.")
-        hvd.init()
     args.epochs = int(args.epochs) if args.epochs else 26
     args.lr_decay_epoch = args.lr_decay_epoch if args.lr_decay_epoch else '17,23'
     args.lr = float(args.lr) if args.lr else (0.00125 * args.batch_size)
@@ -304,7 +292,7 @@ def get_dataset(dataset, args):
         train_dataset = gdata.COCOInstance(splits='instances_train2017')
         val_dataset = gdata.COCOInstance(splits='instances_val2017', skip_empty=False)
         starting_id = 0
-        if args.horovod and MPI:
+        if args.herring:
             length = len(val_dataset)
             shard_len = length // hvd.size()
             rest = length % hvd.size()
@@ -314,7 +302,7 @@ def get_dataset(dataset, args):
                                         use_ext=args.use_ext, starting_id=starting_id)
     else:
         raise NotImplementedError('Dataset: {} not implemented.'.format(dataset))
-    if args.horovod and MPI:
+    if args.herring:
         val_dataset = val_dataset.shard(hvd.size(), hvd.rank())
     return train_dataset, val_dataset, val_metric
 
@@ -326,8 +314,8 @@ def get_dataloader(net, train_dataset, val_dataset, train_transform, val_transfo
     train_sampler = \
         gcv.nn.sampler.SplitSortedBucketSampler(train_dataset.get_im_aspect_ratio(),
                                                 batch_size,
-                                                num_parts=hvd.size() if args.horovod else 1,
-                                                part_index=hvd.rank() if args.horovod else 0,
+                                                num_parts=hvd.size() if args.herring else 1,
+                                                part_index=hvd.rank() if args.herring else 0,
                                                 shuffle=True)
     train_loader = mx.gluon.data.DataLoader(train_dataset.transform(
         train_transform(net.short, net.max_size, net, ashape=net.ashape, multi_stage=args.use_fpn)),
@@ -438,9 +426,8 @@ def validate(net, val_data, async_eval_processes, ctx, eval_metric, logger, epoc
                     round(im_width / im_scale))
                 full_masks = gdata.transforms.mask.fill(det_mask, det_bbox, (im_width, im_height))
                 eval_metric.update(det_bbox, det_id, det_score, full_masks)
-    if args.horovod and MPI is not None:
-        comm = MPI.COMM_WORLD
-        res = comm.gather(eval_metric.get_result_buffer(), root=0)
+    if args.herring:
+        res = worker_comm.gather(eval_metric.get_result_buffer(), root=0)
         if hvd.rank() == 0:
             logger.info('[Epoch {}] Validation Inference cost: {:.3f}'
                         .format(epoch, (time.time() - tic)))
@@ -461,7 +448,7 @@ def validate(net, val_data, async_eval_processes, ctx, eval_metric, logger, epoc
             save_params(net, logger, best_map, current_map, epoch, args.save_interval,
                         args.save_prefix)
 
-    if not args.horovod or hvd.rank() == 0:
+    if not args.herring or hvd.rank() == 0:
         p = Process(target=coco_eval_save_task, args=(eval_metric, logger))
         async_eval_processes.append(p)
         p.start()
@@ -484,8 +471,7 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
         optimizer_params['clip_gradient'] = args.clip_gradient
     if args.amp:
         optimizer_params['multi_precision'] = True
-    if args.horovod:
-        hvd.broadcast_parameters(net.collect_params(), root_rank=0)
+    if args.herring:
         trainer = hvd.DistributedTrainer(
             net.collect_train_params(),  # fix batchnorm, fix first stage, etc...
             'sgd',
@@ -539,7 +525,7 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
     for epoch in range(args.start_epoch, args.epochs):
         rcnn_task = ForwardBackwardTask(net, trainer, rpn_cls_loss, rpn_box_loss, rcnn_cls_loss,
                                         rcnn_box_loss, rcnn_mask_loss, args.amp)
-        executor = Parallel(args.executor_threads, rcnn_task) if not args.horovod else None
+        executor = Parallel(args.executor_threads, rcnn_task) if not args.herring else None
         if not args.disable_hybridization:
             net.hybridize(static_alloc=args.static_alloc)
         while lr_steps and epoch >= lr_steps[0]:
@@ -575,7 +561,7 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
                     result = executor.get()
                 else:
                     result = rcnn_task.forward_backward(list(zip(*batch))[0])
-                if (not args.horovod) or hvd.rank() == 0:
+                if (not args.herring) or hvd.rank() == 0:
                     for k in range(len(metric_losses)):
                         metric_losses[k].append(result[k])
                     for k in range(len(add_losses)):
@@ -593,14 +579,14 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
                 for pred in records:
                     metric.update(pred[0], pred[1])
             trainer.step(batch_size)
-            if (not args.horovod or hvd.rank() == 0) and args.log_interval \
+            if (not args.herring or hvd.rank() == 0) and args.log_interval \
                     and not (i + 1) % args.log_interval:
                 msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics + metrics2])
                 logger.info('[Epoch {}][Batch {}], Speed: {:.3f} samples/sec, {}'.format(
                     epoch, i, args.log_interval * args.batch_size / (time.time() - btic), msg))
                 btic = time.time()
         # validate and save params
-        if (not args.horovod) or hvd.rank() == 0:
+        if (not args.herring) or hvd.rank() == 0:
             msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics])
             logger.info('[Epoch {}] Training cost: {:.3f}, {}'.format(
                 epoch, (time.time() - tic), msg))
@@ -608,7 +594,7 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
             # consider reduce the frequency of validation to save time
             validate(net, val_data, async_eval_processes, ctx, eval_metric, logger, epoch, best_map,
                      args)
-        elif (not args.horovod) or hvd.rank() == 0:
+        elif (not args.herring) or hvd.rank() == 0:
             current_map = 0.
             save_params(net, logger, best_map, current_map, epoch, args.save_interval,
                         args.save_prefix)
@@ -625,7 +611,7 @@ if __name__ == '__main__':
         amp.init()
 
     # training contexts
-    if args.horovod:
+    if args.herring:
         ctx = [mx.gpu(hvd.local_rank())]
     else:
         ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
@@ -640,7 +626,7 @@ if __name__ == '__main__':
         module_list.append(args.norm_layer)
         if args.norm_layer == 'bn':
             kwargs['num_devices'] = len(ctx)
-    num_gpus = hvd.size() if args.horovod else len(ctx)
+    num_gpus = hvd.size() if args.herring else len(ctx)
     net_name = '_'.join(('mask_rcnn', *module_list, args.network, args.dataset))
     if args.custom_model:
         args.use_fpn = True
@@ -709,6 +695,9 @@ if __name__ == '__main__':
         net.collect_params('.*batchnorm.*').setattr('dtype', 'float32')
         net.collect_params('.*normalizedperclassboxcenterencoder.*').setattr('dtype', 'float32')
 
+    # Get the MPI worker communicator for distributed validation
+    worker_comm = hvd.get_worker_comm()
+
     # set up logger
     logging.basicConfig()
     logger = logging.getLogger()
@@ -719,15 +708,16 @@ if __name__ == '__main__':
         os.makedirs(log_dir)
     fh = logging.FileHandler(log_file_path)
     logger.addHandler(fh)
-    if MPI is None and args.horovod:
-        logger.warning('mpi4py is not installed, validation result may be incorrect.')
 
     # training data
     train_dataset, val_dataset, eval_metric = get_dataset(args.dataset, args)
-    batch_size = args.batch_size // num_gpus if args.horovod else args.batch_size
+    batch_size = args.batch_size // num_gpus if args.herring else args.batch_size
     train_data, val_data = get_dataloader(
-        net, train_dataset, val_dataset, MaskRCNNDefaultTrainTransform, MaskRCNNDefaultValTransform,
+        net, train_dataset, val_dataset, MaskRCNNDefaultTrainTransform,
+        MaskRCNNDefaultValTransform,
         batch_size, len(ctx), args)
+
+    hvd.attach_dataloader([train_data, val_data])
 
     # training
     train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
