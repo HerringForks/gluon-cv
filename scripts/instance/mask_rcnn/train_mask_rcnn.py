@@ -46,6 +46,10 @@ def parse_args():
                         help="Base network name which serves as feature extraction base.")
     parser.add_argument('--dataset', type=str, default='coco',
                         help='Training dataset. Now support coco.')
+    parser.add_argument('--train-datapath', type=str, required=True,
+                        help='Training dataset path.')
+    parser.add_argument('--val-datapath', type=str, required=True,
+                        help='Validation dataset path.')
     parser.add_argument('--num-workers', '-j', dest='num_workers', type=int,
                         default=4, help='Number of data workers, you can use larger '
                                         'number to accelerate data loading, if you CPU and GPUs '
@@ -289,8 +293,9 @@ def parse_args():
 
 def get_dataset(dataset, args):
     if dataset.lower() == 'coco':
-        train_dataset = gdata.COCOInstance(splits='instances_train2017')
-        val_dataset = gdata.COCOInstance(splits='instances_val2017', skip_empty=False)
+        train_dataset = gdata.COCOInstance(root=args.train_datapath, splits='instances_train2017')
+        val_dataset = gdata.COCOInstance(root=args.train_datapath, splits='instances_val2017',
+                                         skip_empty=False)
         starting_id = 0
         if args.herring:
             length = len(val_dataset)
