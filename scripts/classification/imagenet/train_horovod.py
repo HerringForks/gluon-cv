@@ -52,7 +52,6 @@ except:
     horovod_mode = False
     pass
 
-herring_mode = False
 try:
     import herring.mxnet as dist
     herring_mode = True
@@ -65,6 +64,10 @@ try:
 except ImportError:
     logging.info('mpi4py is not installed. Use "pip install --no-cache mpi4py" to install')
     MPI = None
+
+if horovod_mode == False and herring_mode == False:
+    logging.info('Neither Hovorod or Herring is installed. Exiting')
+    exit(0)
 
 # Training settings
 parser = argparse.ArgumentParser(description='MXNet ImageNet Example',
@@ -152,7 +155,7 @@ parser.add_argument('--use_avd', action='store_true',
 
 args = parser.parse_args()
 
-# Horovod: initialize Horovod
+# Horovod & Herring: initialize
 if horovod_mode:
     dist.init()
 num_workers = dist.size()
@@ -300,7 +303,7 @@ def get_val_data(rec_val, batch_size, data_nthreads, input_size, crop_ratio):
 
     return val_data, val_batch_fn
 
-# Horovod: pin GPU to local rank
+# Horovod & Herring: pin GPU to local rank
 context = mx.cpu(local_rank) if args.no_cuda else mx.gpu(local_rank)
 
 #def get_train_data(rec_train, batch_size, data_nthreads, input_size, crop_ratio, args):
@@ -340,9 +343,6 @@ from gluoncv.nn.dropblock import DropBlockScheduler
 # does not impact normal model
 drop_scheduler = DropBlockScheduler(net, 0, 0.1, args.num_epochs)
 
-if rank==0:
-    logging.info(net)
-
 # Create initializer
 initializer = mx.init.Xavier(rnd_type='gaussian', factor_type="in", magnitude=2)
 
@@ -367,11 +367,12 @@ def train_gluon():
         top1_name, top1_acc = acc_top1.get()
         top5_name, top5_acc = acc_top5.get()
         comm = None
-        if herring_mode:
-            comm = dist.get_worker_comm()
+
+        # Horovod & Herring: activate distributed validation
+        if horovod_mode and MPI is not None:
+            comm = MPI.COMM_WORLD
         else:
-            if MPI is not None:
-                comm = MPI.COMM_WORLD
+            comm = dist.get_worker_comm()
         if comm is not None:
             res1 = comm.gather(top1_acc, root=0)
             res2 = comm.gather(top5_acc, root=0)
@@ -382,14 +383,11 @@ def train_gluon():
                          epoch, rank, top1_name, top1_acc, top5_name, top5_acc)
 
     # Hybridize and initialize model
-    if herring_mode:
-        net.hybridize(statoc_alloc=True, static_shape=True)
-    else:
-        net.hybridize()
+    net.hybridize()
+
     #net.initialize(initializer, ctx=context)
     if args.resume_params is not '':
         net.load_parameters(args.resume_params, ctx = context)
-
     else:
         net.initialize(initializer, ctx=context)
 
@@ -411,7 +409,7 @@ def train_gluon():
         optimizer_params['multi_precision'] = True
     opt = mx.optimizer.create(optimizer, **optimizer_params)
 
-    # Horovod: create DistributedTrainer, a subclass of gluon.Trainer
+    # Horovod & Herring: create DistributedTrainer, a subclass of gluon.Trainer
     trainer = dist.DistributedTrainer(params, opt)
     if args.resume_states is not '':
         trainer.load_states(args.resume_states)
