@@ -36,7 +36,6 @@ gcv.utils.check_version('0.6.0')
 
 from gluoncv.model_zoo import get_model
 from gluoncv.utils import makedirs#, LRSequential, LRScheduler
-import horovod.mxnet as hvd
 import mxnet as mx
 import numpy as np
 from mxnet import autograd, gluon, lr_scheduler
@@ -45,6 +44,21 @@ from mxnet.io import DataBatch, DataIter
 from mxnet.gluon.data.vision import transforms
 
 from PIL import Image
+
+try:
+    import horovod.mxnet as dist
+    horovod_mode = True
+except:
+    horovod_mode = False
+    pass
+
+herring_mode = False
+try:
+    import herring.mxnet as dist
+    herring_mode = True
+except:
+    herring_mode = False
+    pass
 
 try:
     from mpi4py import MPI
@@ -139,10 +153,11 @@ parser.add_argument('--use_avd', action='store_true',
 args = parser.parse_args()
 
 # Horovod: initialize Horovod
-hvd.init()
-num_workers = hvd.size()
-rank = hvd.rank()
-local_rank = hvd.local_rank()
+if horovod_mode:
+    dist.init()
+num_workers = dist.size()
+rank = dist.rank()
+local_rank = dist.local_rank()
 
 if rank==0:
     logging.basicConfig(level=logging.INFO)
@@ -166,7 +181,7 @@ lr_sched = lr_scheduler.CosineScheduler(
 class SplitSampler(mx.gluon.data.sampler.Sampler):
     """ Split the dataset into `num_parts` parts and sample from the part with
     index `part_index`
- 
+
     Parameters
     ----------
     length: int
@@ -184,14 +199,14 @@ class SplitSampler(mx.gluon.data.sampler.Sampler):
         # Compute the end index for this partition
         self.end = self.start + self.part_len
         self.random = random
- 
+
     def __iter__(self):
         # Extract examples between `start` and `end`, shuffle and return them.
         indices = list(range(self.start, self.end))
         if self.random:
             random.shuffle(indices)
         return iter(indices)
- 
+
     def __len__(self):
         return self.part_len
 
@@ -234,7 +249,7 @@ def get_train_data(rec_train, batch_size, data_nthreads, input_size, crop_ratio,
             transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
-        
+
     transform_train = transforms.Compose(train_transforms)
 
     train_set = mx.gluon.data.vision.ImageRecordDataset(rec_train).transform_first(transform_train)
@@ -294,12 +309,17 @@ train_data, train_batch_fn = get_train_data(args.rec_train, batch_size, args.dat
 val_data, val_batch_fn = get_val_data(args.rec_val, batch_size, args.data_nthreads, args.input_size,
                                       args.crop_ratio)
 
+if herring_mode:
+    dist.attach_dataloader([train_data, val_data])
+
 # Get model from GluonCV model zoo
 # https://gluon-cv.mxnet.io/model_zoo/index.html
 kwargs = {'ctx': context,
           'pretrained': args.use_pretrained,
-          'classes': num_classes,
-          'input_size': args.input_size}
+          'classes': num_classes}
+
+if horovod_mode:
+    kwargs['input_size'] = args.input_size
 
 if args.last_gamma:
     kwargs['last_gamma'] = True
@@ -346,20 +366,26 @@ def train_gluon():
 
         top1_name, top1_acc = acc_top1.get()
         top5_name, top5_acc = acc_top5.get()
-        if MPI is not None:
-            comm = MPI.COMM_WORLD
+        comm = None
+        if herring_mode:
+            comm = dist.get_worker_comm()
+        else:
+            if MPI is not None:
+                comm = MPI.COMM_WORLD
+        if comm is not None:
             res1 = comm.gather(top1_acc, root=0)
             res2 = comm.gather(top5_acc, root=0)
-        if rank==0:
-            if MPI is not None:
-                #logging.info('MPI gather res1: {}'.format(res1))
+            if rank==0:
                 top1_acc = sum(res1) / len(res1)
                 top5_acc = sum(res2) / len(res2)
-            logging.info('Epoch[%d] Rank[%d]\tValidation-%s=%f\tValidation-%s=%f',
+                logging.info('Epoch[%d] Rank[%d]\tValidation-%s=%f\tValidation-%s=%f',
                          epoch, rank, top1_name, top1_acc, top5_name, top5_acc)
 
     # Hybridize and initialize model
-    net.hybridize()
+    if herring_mode:
+        net.hybridize(statoc_alloc=True, static_shape=True)
+    else:
+        net.hybridize()
     #net.initialize(initializer, ctx=context)
     if args.resume_params is not '':
         net.load_parameters(args.resume_params, ctx = context)
@@ -373,8 +399,8 @@ def train_gluon():
 
     # Horovod: fetch and broadcast parameters
     params = net.collect_params()
-    if params is not None:
-        hvd.broadcast_parameters(params, root_rank=0)
+    if horovod_mode and params is not None:
+        dist.broadcast_parameters(params, root_rank=0)
 
     # Create optimizer
     optimizer = 'nag'
@@ -386,7 +412,7 @@ def train_gluon():
     opt = mx.optimizer.create(optimizer, **optimizer_params)
 
     # Horovod: create DistributedTrainer, a subclass of gluon.Trainer
-    trainer = hvd.DistributedTrainer(params, opt)
+    trainer = dist.DistributedTrainer(params, opt)
     if args.resume_states is not '':
         trainer.load_states(args.resume_states)
 
@@ -433,6 +459,7 @@ def train_gluon():
         return smoothed
 
     # Train model
+    total_time = 0
     for epoch in range(args.resume_epoch, args.num_epochs):
         drop_scheduler(epoch)
         tic = time.time()
@@ -499,6 +526,7 @@ def train_gluon():
 
         # Report metrics
         elapsed = time.time() - tic
+        total_time += elapsed
         _, acc = train_metric.get()
         if rank == 0:
             logging.info('Epoch[%d] Rank[%d] Batch[%d]\tTime cost=%.2f\tTrain-metric=%f',
@@ -514,6 +542,9 @@ def train_gluon():
         if args.save_frequency and (epoch + 1) % args.save_frequency == 0:
             net.save_parameters('%s/imagenet-%s-%d.params'%(save_dir, args.model, epoch))
             trainer.save_states('%s/imagenet-%s-%d.states'%(save_dir, args.model, epoch))
+
+    if rank == 0:
+        logging.info('Total Training Time: %d Seconds', total_time)
 
     # Evaluate performance at the end of training
     evaluate(epoch)
