@@ -294,6 +294,7 @@ def train_gluon():
     worker_comm = herring.get_worker_comm()
 
     # Train model
+    total_time = 0
     for epoch in range(args.resume_epoch, args.num_epochs):
         tic = time.time()
         train_metric.reset()
@@ -326,6 +327,7 @@ def train_gluon():
 
         # Report metrics
         elapsed = time.time() - tic
+        total_time += elapsed
         _, acc = train_metric.get()
         if rank == 0:
             logging.info('Epoch[%d] Rank[%d] Batch[%d]\tTime cost=%.2f \
@@ -345,7 +347,10 @@ def train_gluon():
             trainer.save_states('%s/imagenet-%s-%d.states' % (save_dir,
                                                               args.model, epoch))
 
+    logging.info('Total Training Time: %d Seconds', total_time)
+
     # Evaluate performance at the end of training
+    logging.info('Start Distributed Evaluation')
     evaluate(args.num_epochs - 1)
 
     net.save_parameters('%s/imagenet-%s-%d.params' % (save_dir, args.model,
