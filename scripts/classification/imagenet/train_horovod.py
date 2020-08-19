@@ -154,9 +154,6 @@ parser.add_argument('--auto_aug', action='store_true',
                     help='use auto_aug. default is false.')
 parser.add_argument('--use_avd', action='store_true',
                     help='use avd. default is false.')
-parser.add_argument('--use_amp', action='store_true',
-                    help='use avd. default is false.')
-
 
 args = parser.parse_args()
 
