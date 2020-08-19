@@ -84,6 +84,8 @@ parser.add_argument('--batch-size', type=int, default=128,
                     help='training batch size per device (default: 128)')
 parser.add_argument('--dtype', type=str, default='float32',
                     help='data type for training (default: float32)')
+parser.add_argument('--amp', action='store_true',
+                    help='use automatic mixed precision. default is false.')
 parser.add_argument('--num-epochs', type=int, default=90,
                     help='number of training epochs (default: 90)')
 parser.add_argument('--lr', type=float, default=0.05,
@@ -152,6 +154,9 @@ parser.add_argument('--auto_aug', action='store_true',
                     help='use auto_aug. default is false.')
 parser.add_argument('--use_avd', action='store_true',
                     help='use avd. default is false.')
+parser.add_argument('--use_amp', action='store_true',
+                    help='use avd. default is false.')
+
 
 args = parser.parse_args()
 
@@ -161,6 +166,10 @@ if horovod_mode:
 num_workers = dist.size()
 rank = dist.rank()
 local_rank = dist.local_rank()
+
+if args.amp:
+    from mxnet.contrib import amp
+    amp.init()
 
 if rank==0:
     logging.basicConfig(level=logging.INFO)
@@ -414,6 +423,9 @@ def train_gluon():
     if args.resume_states is not '':
         trainer.load_states(args.resume_states)
 
+    if args.amp:
+        amp.init_trainer(trainer)
+
     # Create loss function and train metric
     if args.label_smoothing or args.mixup:
         sparse_label_loss = False
@@ -495,8 +507,13 @@ def train_gluon():
                             p.astype('float32', copy=False)) for yhat, y, p in zip(outputs, label, teacher_prob)]
                 else:
                     loss = [loss_fn(yhat, y.astype(args.dtype, copy=False)) for yhat, y in zip(outputs, label)]
-            for l in loss:
-                l.backward()
+                for l in loss:
+                    if args.amp:
+                        with amp.scale_loss(l, trainer) as scaled_loss:
+                            autograd.backward(scaled_loss)
+                    else:
+                        l.backward()
+
             trainer.step(batch_size)
 
             if args.mixup:
