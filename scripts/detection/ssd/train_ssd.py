@@ -106,8 +106,8 @@ def get_dataset(dataset, args):
             splits=[(2007, 'test')])
         val_metric = VOC07MApMetric(iou_thresh=0.5, class_names=val_dataset.classes)
     elif dataset.lower() == 'coco':
-        train_dataset = gdata.COCODetection(root=args.dataset_root + "/coco", splits='instances_train2017')
-        val_dataset = gdata.COCODetection(root=args.dataset_root + "/coco", splits='instances_val2017', skip_empty=False)
+        train_dataset = gdata.COCODetection(root=args.dataset_root, splits='instances_train2017')
+        val_dataset = gdata.COCODetection(root=args.dataset_root, splits='instances_val2017', skip_empty=False)
         val_metric = COCODetectionMetric(
             val_dataset, args.save_prefix + '_eval', cleanup=True,
             data_shape=(args.data_shape, args.data_shape))
@@ -145,13 +145,8 @@ def get_dali_dataset(dataset_name, devices, args):
     if dataset_name.lower() == "coco":
         # training
         expanded_file_root = os.path.expanduser(args.dataset_root)
-        coco_root = os.path.join(expanded_file_root,
-                                 'coco',
-                                 'train2017')
-        coco_annotations = os.path.join(expanded_file_root,
-                                        'coco',
-                                        'annotations',
-                                        'instances_train2017.json')
+        coco_root = os.path.join(expanded_file_root, 'train2017')
+        coco_annotations = os.path.join(expanded_file_root, 'annotations', 'instances_train2017.json')
         if args.herring:
             train_dataset = [gdata.COCODetectionDALI(num_shards=hvd.size(), shard_id=hvd.rank(), file_root=coco_root,
                                                      annotations_file=coco_annotations, device_id=hvd.local_rank())]
@@ -161,7 +156,7 @@ def get_dali_dataset(dataset_name, devices, args):
 
         # validation
         if (not args.herring or hvd.rank() == 0):
-            val_dataset = gdata.COCODetection(root=os.path.join(args.dataset_root + '/coco'),
+            val_dataset = gdata.COCODetection(root=os.path.join(args.dataset_root),
                                               splits='instances_val2017',
                                               skip_empty=False)
             val_metric = COCODetectionMetric(
@@ -295,6 +290,7 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
     logger.info('Start training from [Epoch {}]'.format(args.start_epoch))
     best_map = [0]
 
+    total_time = 0
     for epoch in range(args.start_epoch, args.epochs):
         while lr_steps and epoch >= lr_steps[0]:
             new_lr = trainer.learning_rate * lr_decay
@@ -351,8 +347,10 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
         if (not args.herring or hvd.rank() == 0):
             name1, loss1 = ce_metric.get()
             name2, loss2 = smoothl1_metric.get()
+            time_epoch = time.time()-tic
+            total_time += time_epoch
             logger.info('[Epoch {}] Training cost: {:.3f}, {}={:.3f}, {}={:.3f}'.format(
-                epoch, (time.time()-tic), name1, loss1, name2, loss2))
+                epoch, time_epoch, name1, loss1, name2, loss2))
             if ((epoch + 1) % args.val_interval == 0) or (args.save_interval and (epoch + 1) % args.save_interval == 0):
                 # consider reduce the frequency of validation to save time
                 map_name, mean_ap = validate(net, val_data, ctx, eval_metric)
@@ -361,7 +359,10 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
                 current_map = float(mean_ap[-1])
             else:
                 current_map = 0.
-            #save_params(net, best_map, current_map, epoch, args.save_interval, args.save_prefix)
+            save_params(net, best_map, current_map, epoch, args.save_interval, args.save_prefix)
+
+    if hvd.rank() == 0:
+        logging.info('Total Training Time: %d Seconds', total_time)
 
 if __name__ == '__main__':
     args = parse_args()
@@ -383,6 +384,15 @@ if __name__ == '__main__':
         ctx = ctx if ctx else [mx.cpu()]
 
     # network
+    if args.herring:
+        # get around race condition in model_store for creating pretrain model folder
+        root = os.path.join('~', '.mxnet', 'models')
+        if 'MXNET_HOME' in os.environ:
+            root = os.path.join(os.environ['MXNET_HOME'], 'models')
+        root = os.path.expanduser(root)
+        if hvd.local_rank() == 0 and not os.path.exists(root):
+            os.makedirs(root)
+
     net_name = '_'.join(('ssd', str(args.data_shape), args.network, args.dataset))
     args.save_prefix += net_name
     if args.syncbn and len(ctx) > 1:
