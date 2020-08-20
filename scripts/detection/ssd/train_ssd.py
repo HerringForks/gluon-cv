@@ -422,3 +422,6 @@ if __name__ == '__main__':
     hvd.attach_dataloader([train_data, val_data])
     # training
     train(net, train_data, val_data, eval_metric, ctx, args)
+
+    # Wait for all async operations to finish
+    mx.ndarray.waitall()
