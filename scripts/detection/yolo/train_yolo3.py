@@ -24,7 +24,7 @@ from gluoncv.utils import LRScheduler, LRSequential
 
 from mxnet.contrib import amp
 try:
-    import horovod.mxnet as hvd
+    import herring.mxnet as hvd
 except ImportError:
     hvd = None
 
@@ -97,9 +97,9 @@ def parse_args():
     parser.add_argument('--label-smooth', action='store_true', help='Use label smoothing.')
     parser.add_argument('--amp', action='store_true',
                         help='Use MXNet AMP for mixed precision training.')
-    parser.add_argument('--horovod', action='store_true',
-                        help='Use MXNet Horovod for distributed training. Must be run with OpenMPI. '
-                        '--gpus is ignored when using --horovod.')
+    parser.add_argument('--herring', action='store_true',
+                        help='Use MXNet Herring for distributed training. Must be run with OpenMPI. '
+                        '--gpus is ignored when using --herring.')
 
     args = parser.parse_args()
     return args
@@ -130,15 +130,26 @@ def get_dataloader(net, train_dataset, val_dataset, data_shape, batch_size, num_
     """Get dataloader."""
     width, height = data_shape, data_shape
     batchify_fn = Tuple(*([Stack() for _ in range(6)] + [Pad(axis=0, pad_val=-1) for _ in range(1)]))  # stack image, all targets generated
+
+    if args.mixup:
+        im_aspect_ratio = train_dataset._dataset.get_im_aspect_ratio()
+    else:
+        im_aspect_ratio = train_dataset.get_im_aspect_ratio()
+    train_sampler = \
+        gcv.nn.sampler.SplitSortedBucketSampler(im_aspect_ratio,
+                                                batch_size,
+                                                num_parts=hvd.size() if args.herring else 1,
+                                                part_index=hvd.rank() if args.herring else 0,
+                                                shuffle=True)
     if args.no_random_shape:
         train_loader = gluon.data.DataLoader(
             train_dataset.transform(YOLO3DefaultTrainTransform(width, height, net, mixup=args.mixup)),
-            batch_size, True, batchify_fn=batchify_fn, last_batch='rollover', num_workers=num_workers)
+            batch_sampler=train_sampler, batchify_fn=batchify_fn, num_workers=num_workers)
     else:
         transform_fns = [YOLO3DefaultTrainTransform(x * 32, x * 32, net, mixup=args.mixup) for x in range(10, 20)]
         train_loader = RandomTransformDataLoader(
-            transform_fns, train_dataset, batch_size=batch_size, interval=10, last_batch='rollover',
-            shuffle=True, batchify_fn=batchify_fn, num_workers=num_workers)
+            transform_fns, train_dataset, interval=10,
+            batch_sampler=train_sampler, batchify_fn=batchify_fn, num_workers=num_workers)
     val_batchify_fn = Tuple(Stack(), Pad(pad_val=-1))
     val_loader = gluon.data.DataLoader(
         val_dataset.transform(YOLO3DefaultValTransform(width, height)),
@@ -213,8 +224,8 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
                     step_factor=args.lr_decay, power=2),
     ])
 
-    if args.horovod:
-        hvd.broadcast_parameters(net.collect_params(), root_rank=0)
+    if args.herring:
+        #hvd.broadcast_parameters(net.collect_params(), root_rank=0)
         trainer = hvd.DistributedTrainer(
                         net.collect_params(), 'sgd',
                         {'wd': args.wd, 'momentum': args.momentum, 'lr_scheduler': lr_scheduler})
@@ -291,7 +302,7 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
                 else:
                     autograd.backward(sum_losses)
             trainer.step(batch_size)
-            if (not args.horovod or hvd.rank() == 0):
+            if (not args.herring or hvd.rank() == 0):
                 obj_metrics.update(0, obj_losses)
                 center_metrics.update(0, center_losses)
                 scale_metrics.update(0, scale_losses)
@@ -302,10 +313,10 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
                     name3, loss3 = scale_metrics.get()
                     name4, loss4 = cls_metrics.get()
                     logger.info('[Epoch {}][Batch {}], LR: {:.2E}, Speed: {:.3f} samples/sec, {}={:.3f}, {}={:.3f}, {}={:.3f}, {}={:.3f}'.format(
-                        epoch, i, trainer.learning_rate, args.batch_size/(time.time()-btic), name1, loss1, name2, loss2, name3, loss3, name4, loss4))
-                btic = time.time()
+                        epoch, i, trainer.learning_rate, args.log_interval * args.batch_size / (time.time() - btic), name1, loss1, name2, loss2, name3, loss3, name4, loss4))
+                    btic = time.time()
 
-        if (not args.horovod or hvd.rank() == 0):
+        if (not args.herring or hvd.rank() == 0):
             name1, loss1 = obj_metrics.get()
             name2, loss2 = center_metrics.get()
             name3, loss3 = scale_metrics.get()
@@ -328,17 +339,17 @@ if __name__ == '__main__':
     if args.amp:
         amp.init()
 
-    if args.horovod:
+    if args.herring:
         if hvd is None:
             raise SystemExit("Horovod not found, please check if you installed it correctly.")
-        hvd.init()
+        #hvd.init()
 
     # fix seed for mxnet, numpy and python builtin random generator.
     gutils.random.seed(args.seed)
 
 
     # training contexts
-    if args.horovod:
+    if args.herring:
         ctx = [mx.gpu(hvd.local_rank())]
     else:
         ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
@@ -365,10 +376,11 @@ if __name__ == '__main__':
             async_net.initialize()
 
     # training data
-    batch_size = (args.batch_size // hvd.size()) if args.horovod else args.batch_size
+    batch_size = (args.batch_size // hvd.size()) if args.herring else args.batch_size
     train_dataset, val_dataset, eval_metric = get_dataset(args.dataset, args)
     train_data, val_data = get_dataloader(
         async_net, train_dataset, val_dataset, args.data_shape, batch_size, args.num_workers, args)
 
+    hvd.attach_dataloader([train_data, val_data])
     # training
     train(net, train_data, val_data, eval_metric, ctx, args)
