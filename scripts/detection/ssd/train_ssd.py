@@ -26,7 +26,7 @@ from gluoncv.utils.metrics.accuracy import Accuracy
 from mxnet.contrib import amp
 
 try:
-    import horovod.mxnet as hvd
+    import herring.mxnet as hvd
 except ImportError:
     hvd = None
 
@@ -89,13 +89,13 @@ def parse_args():
                         'Currently supports only COCO.')
     parser.add_argument('--amp', action='store_true',
                         help='Use MXNet AMP for mixed precision training.')
-    parser.add_argument('--horovod', action='store_true',
-                        help='Use MXNet Horovod for distributed training. Must be run with OpenMPI. '
-                        '--gpus is ignored when using --horovod.')
+    parser.add_argument('--herring', action='store_true',
+                        help='Use MXNet Herring for distributed training. Must be run with OpenMPI. '
+                        '--gpus is ignored when using --herring.')
 
     args = parser.parse_args()
-    if args.horovod:
-        assert hvd, "You are trying to use horovod support but it's not installed"
+    #if args.horovod:
+    #    assert hvd, "You are trying to use horovod support but it's not installed"
     return args
 
 def get_dataset(dataset, args):
@@ -126,9 +126,15 @@ def get_dataloader(net, train_dataset, val_dataset, data_shape, batch_size, num_
         _, _, anchors = net(mx.nd.zeros((1, 3, height, width), ctx))
     anchors = anchors.as_in_context(mx.cpu())
     batchify_fn = Tuple(Stack(), Stack(), Stack())  # stack image, cls_targets, box_targets
+    train_sampler = \
+        gcv.nn.sampler.SplitSortedBucketSampler(train_dataset.get_im_aspect_ratio(),
+                                                batch_size,
+                                                num_parts=hvd.size() if args.herring else 1,
+                                                part_index=hvd.rank() if args.herring else 0,
+                                                shuffle=True)
     train_loader = gluon.data.DataLoader(
         train_dataset.transform(SSDDefaultTrainTransform(width, height, anchors)),
-        batch_size, True, batchify_fn=batchify_fn, last_batch='rollover', num_workers=num_workers)
+        batch_sampler=train_sampler, batchify_fn=batchify_fn, num_workers=num_workers)
     val_batchify_fn = Tuple(Stack(), Pad(pad_val=-1))
     val_loader = gluon.data.DataLoader(
         val_dataset.transform(SSDDefaultValTransform(width, height)),
@@ -146,7 +152,7 @@ def get_dali_dataset(dataset_name, devices, args):
                                         'coco',
                                         'annotations',
                                         'instances_train2017.json')
-        if args.horovod:
+        if args.herring:
             train_dataset = [gdata.COCODetectionDALI(num_shards=hvd.size(), shard_id=hvd.rank(), file_root=coco_root,
                                                      annotations_file=coco_annotations, device_id=hvd.local_rank())]
         else:
@@ -154,7 +160,7 @@ def get_dali_dataset(dataset_name, devices, args):
                                                      annotations_file=coco_annotations, device_id=i) for i, _ in enumerate(devices)]
 
         # validation
-        if (not args.horovod or hvd.rank() == 0):
+        if (not args.herring or hvd.rank() == 0):
             val_dataset = gdata.COCODetection(root=os.path.join(args.dataset_root + '/coco'),
                                               splits='instances_val2017',
                                               skip_empty=False)
@@ -169,13 +175,13 @@ def get_dali_dataset(dataset_name, devices, args):
 
     return train_dataset, val_dataset, val_metric
 
-def get_dali_dataloader(net, train_dataset, val_dataset, data_shape, global_batch_size, num_workers, devices, ctx, horovod):
+def get_dali_dataloader(net, train_dataset, val_dataset, data_shape, global_batch_size, num_workers, devices, ctx, herring):
     width, height = data_shape, data_shape
     with autograd.train_mode():
         _, _, anchors = net(mx.nd.zeros((1, 3, height, width), ctx=ctx))
     anchors = anchors.as_in_context(mx.cpu())
 
-    if horovod:
+    if herring:
         batch_size = global_batch_size // hvd.size()
         pipelines = [SSDDALIPipeline(device_id=hvd.local_rank(), batch_size=batch_size,
                                      data_shape=data_shape, anchors=anchors,
@@ -189,7 +195,7 @@ def get_dali_dataloader(net, train_dataset, val_dataset, data_shape, global_batc
                                      dataset_reader = train_dataset[i]) for i, device_id in enumerate(devices)]
 
     epoch_size = train_dataset[0].size()
-    if horovod:
+    if herring:
         epoch_size //= hvd.size()
     train_loader = DALIGenericIterator(pipelines, [('data', DALIGenericIterator.DATA_TAG),
                                                     ('bboxes', DALIGenericIterator.LABEL_TAG),
@@ -197,7 +203,7 @@ def get_dali_dataloader(net, train_dataset, val_dataset, data_shape, global_batc
                                                     epoch_size, auto_reset=True)
 
     # validation
-    if (not horovod or hvd.rank() == 0):
+    if (not herring or hvd.rank() == 0):
         val_batchify_fn = Tuple(Stack(), Pad(pad_val=-1))
         val_loader = gluon.data.DataLoader(
             val_dataset.transform(SSDDefaultValTransform(width, height)),
@@ -253,8 +259,8 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
     """Training pipeline"""
     net.collect_params().reset_ctx(ctx)
 
-    if args.horovod:
-        hvd.broadcast_parameters(net.collect_params(), root_rank=0)
+    if args.herring:
+        #hvd.broadcast_parameters(net.collect_params(), root_rank=0)
         trainer = hvd.DistributedTrainer(
                         net.collect_params(), 'sgd',
                         {'learning_rate': args.lr, 'wd': args.wd, 'momentum': args.momentum})
@@ -331,23 +337,23 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
             # by batch-size anymore
             trainer.step(1)
 
-            if (not args.horovod or hvd.rank() == 0):
-                local_batch_size = int(args.batch_size // (hvd.size() if args.horovod else 1))
+            if (not args.herring or hvd.rank() == 0):
+                local_batch_size = int(args.batch_size // (hvd.size() if args.herring else 1))
                 ce_metric.update(0, [l * local_batch_size for l in cls_loss])
                 smoothl1_metric.update(0, [l * local_batch_size for l in box_loss])
                 if args.log_interval and not (i + 1) % args.log_interval:
                     name1, loss1 = ce_metric.get()
                     name2, loss2 = smoothl1_metric.get()
                     logger.info('[Epoch {}][Batch {}], Speed: {:.3f} samples/sec, {}={:.3f}, {}={:.3f}'.format(
-                        epoch, i, args.batch_size/(time.time()-btic), name1, loss1, name2, loss2))
-                btic = time.time()
+                        epoch, i, args.log_interval * args.batch_size / (time.time() - btic), name1, loss1, name2, loss2))
+                    btic = time.time()
 
-        if (not args.horovod or hvd.rank() == 0):
+        if (not args.herring or hvd.rank() == 0):
             name1, loss1 = ce_metric.get()
             name2, loss2 = smoothl1_metric.get()
             logger.info('[Epoch {}] Training cost: {:.3f}, {}={:.3f}, {}={:.3f}'.format(
                 epoch, (time.time()-tic), name1, loss1, name2, loss2))
-            if (epoch % args.val_interval == 0) or (args.save_interval and epoch % args.save_interval == 0):
+            if ((epoch + 1) % args.val_interval == 0) or (args.save_interval and (epoch + 1) % args.save_interval == 0):
                 # consider reduce the frequency of validation to save time
                 map_name, mean_ap = validate(net, val_data, ctx, eval_metric)
                 val_msg = '\n'.join(['{}={}'.format(k, v) for k, v in zip(map_name, mean_ap)])
@@ -355,7 +361,7 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
                 current_map = float(mean_ap[-1])
             else:
                 current_map = 0.
-            save_params(net, best_map, current_map, epoch, args.save_interval, args.save_prefix)
+            #save_params(net, best_map, current_map, epoch, args.save_interval, args.save_prefix)
 
 if __name__ == '__main__':
     args = parse_args()
@@ -363,14 +369,14 @@ if __name__ == '__main__':
     if args.amp:
         amp.init()
 
-    if args.horovod:
-        hvd.init()
+    #if args.horovod:
+    #    hvd.init()
 
     # fix seed for mxnet, numpy and python builtin random generator.
     gutils.random.seed(args.seed)
 
     # training contexts
-    if args.horovod:
+    if args.herring:
         ctx = [mx.gpu(hvd.local_rank())]
     else:
         ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
@@ -405,14 +411,14 @@ if __name__ == '__main__':
         train_dataset, val_dataset, eval_metric = get_dali_dataset(args.dataset, devices, args)
         train_data, val_data = get_dali_dataloader(
             async_net, train_dataset, val_dataset, args.data_shape, args.batch_size, args.num_workers,
-            devices, ctx[0], args.horovod)
+            devices, ctx[0], args.herring)
     else:
         train_dataset, val_dataset, eval_metric = get_dataset(args.dataset, args)
-        batch_size = (args.batch_size // hvd.size()) if args.horovod else args.batch_size
+        batch_size = (args.batch_size // hvd.size()) if args.herring else args.batch_size
         train_data, val_data = get_dataloader(
             async_net, train_dataset, val_dataset, args.data_shape, batch_size, args.num_workers, ctx[0])
 
 
-
+    hvd.attach_dataloader([train_data, val_data])
     # training
     train(net, train_data, val_data, eval_metric, ctx, args)
