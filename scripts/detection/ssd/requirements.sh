@@ -1,1 +1,1 @@
-pip install pycocotools
+pip --no-cache-dir --no-cache install 'git+https://github.com/NVIDIA/cocoapi#egg=pycocotools&subdirectory=PythonAPI'
