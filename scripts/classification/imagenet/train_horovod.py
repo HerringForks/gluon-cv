@@ -36,6 +36,7 @@ gcv.utils.check_version('0.6.0')
 
 from gluoncv.model_zoo import get_model
 from gluoncv.utils import makedirs#, LRSequential, LRScheduler
+from gluoncv import utils as gutils
 import mxnet as mx
 import numpy as np
 from mxnet import autograd, gluon, lr_scheduler
@@ -115,6 +116,8 @@ parser.add_argument('--temperature', type=float, default=20,
                     help='temperature parameter for distillation teacher model')
 parser.add_argument('--hard-weight', type=float, default=0.5,
                     help='weight for the loss of one-hot label for distillation training')
+parser.add_argument('--seed', type=int, default=233,
+                    help='Random seed to be fixed.')
 
 parser.add_argument('--model', type=str, default='resnet50_v1',
                     help='type of model to use. see vision_model for options.')
@@ -154,6 +157,9 @@ parser.add_argument('--use_avd', action='store_true',
                     help='use avd. default is false.')
 
 args = parser.parse_args()
+
+# fix seed for mxnet, numpy and python builtin random generator.
+gutils.random.seed(args.seed)
 
 # Horovod & Herring: initialize
 if horovod_mode:
