@@ -324,7 +324,7 @@ def get_dataloader(net, train_dataset, val_dataset, train_transform, val_transfo
                                                 shuffle=True)
     train_loader = mx.gluon.data.DataLoader(train_dataset.transform(
         train_transform(net.short, net.max_size, net, ashape=net.ashape, multi_stage=args.use_fpn)),
-        batch_sampler=train_sampler, batchify_fn=train_bfn, num_workers=args.num_workers)
+        batch_sampler=train_sampler, batchify_fn=train_bfn, num_workers=args.num_workers, thread_pool=True)
     val_bfn = batchify.Tuple(*[batchify.Append() for _ in range(2)])
     short = net.short[-1] if isinstance(net.short, (tuple, list)) else net.short
     # validation use 1 sample per device
