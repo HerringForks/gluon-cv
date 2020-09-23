@@ -622,6 +622,15 @@ if __name__ == '__main__':
         ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
         ctx = ctx if ctx else [mx.cpu()]
 
+    if args.herring:
+        # get around race condition in model_store for creating pretrain model folder
+        root = os.path.join('~', '.mxnet', 'models')
+        if 'MXNET_HOME' in os.environ:
+            root = os.path.join(os.environ['MXNET_HOME'], 'models')
+        root = os.path.expanduser(root)
+        if hvd.local_rank() == 0 and not os.path.exists(root):
+            os.makedirs(root)
+
     # network
     kwargs = {}
     module_list = []
