@@ -35,7 +35,7 @@ from gluoncv.data import COCODetection, VOCDetection
 from multiprocessing import Process
 from gluoncv.model_zoo.rcnn.mask_rcnn.data_parallel import ForwardBackwardTask
 
-import herring.mxnet as hvd
+import smdistributed.dataparallel.mxnet as dist
 
 
 # from mxnet import profiler
@@ -120,15 +120,15 @@ def parse_args():
                         help='Whether to use static memory allocation. Memory usage will increase.')
     parser.add_argument('--amp', action='store_true',
                         help='Use MXNet AMP for mixed precision training.')
-    parser.add_argument('--herring', action='store_true',
-                        help='Use MXNet Herring for distributed training. Must be run with OpenMPI. '
-                             '--gpus is ignored when using --herring.')
+    parser.add_argument('--smdataparallel', action='store_true',
+                        help='Use smdistributed.dataparallel MXNet for distributed training. Must be run with OpenMPI. '
+                             '--gpus is ignored when using --smdataparallel.')
     parser.add_argument('--use-ext', action='store_true',
                         help='Use NVIDIA MSCOCO API. Make sure you install first')
     parser.add_argument('--executor-threads', type=int, default=1,
                         help='Number of threads for executor for scheduling ops. '
                              'More threads may incur higher GPU memory footprint, '
-                             'but may speed up throughput. Note that when herring is used, '
+                             'but may speed up throughput. Note that when smdataparallel is used, '
                              'it is set to 1.')
     parser.add_argument('--kv-store', type=str, default='nccl',
                         help='KV store options. local, device, nccl, dist_sync, dist_device_sync, '
@@ -297,18 +297,18 @@ def get_dataset(dataset, args):
         val_dataset = gdata.COCOInstance(root=args.train_datapath, splits='instances_val2017',
                                          skip_empty=False)
         starting_id = 0
-        if args.herring:
+        if args.smdataparallel:
             length = len(val_dataset)
-            shard_len = length // hvd.size()
-            rest = length % hvd.size()
+            shard_len = length // dist.size()
+            rest = length % dist.size()
             # Compute the start index for this partition
-            starting_id = shard_len * hvd.rank() + min(hvd.rank(), rest)
+            starting_id = shard_len * dist.rank() + min(dist.rank(), rest)
         val_metric = COCOInstanceMetric(val_dataset, args.save_prefix + '_eval',
                                         use_ext=args.use_ext, starting_id=starting_id)
     else:
         raise NotImplementedError('Dataset: {} not implemented.'.format(dataset))
-    if args.herring:
-        val_dataset = val_dataset.shard(hvd.size(), hvd.rank())
+    if args.smdataparallel:
+        val_dataset = val_dataset.shard(dist.size(), dist.rank())
     return train_dataset, val_dataset, val_metric
 
 
@@ -319,8 +319,8 @@ def get_dataloader(net, train_dataset, val_dataset, train_transform, val_transfo
     train_sampler = \
         gcv.nn.sampler.SplitSortedBucketSampler(train_dataset.get_im_aspect_ratio(),
                                                 batch_size,
-                                                num_parts=hvd.size() if args.herring else 1,
-                                                part_index=hvd.rank() if args.herring else 0,
+                                                num_parts=dist.size() if args.smdataparallel else 1,
+                                                part_index=dist.rank() if args.smdataparallel else 0,
                                                 shuffle=True)
     train_loader = mx.gluon.data.DataLoader(train_dataset.transform(
         train_transform(net.short, net.max_size, net, ashape=net.ashape, multi_stage=args.use_fpn)),
@@ -431,9 +431,9 @@ def validate(net, val_data, async_eval_processes, ctx, eval_metric, logger, epoc
                     round(im_width / im_scale))
                 full_masks = gdata.transforms.mask.fill(det_mask, det_bbox, (im_width, im_height))
                 eval_metric.update(det_bbox, det_id, det_score, full_masks)
-    if args.herring:
+    if args.smdataparallel:
         res = worker_comm.gather(eval_metric.get_result_buffer(), root=0)
-        if hvd.rank() == 0:
+        if dist.rank() == 0:
             logger.info('[Epoch {}] Validation Inference cost: {:.3f}'
                         .format(epoch, (time.time() - tic)))
             rank0_res = eval_metric.get_result_buffer()
@@ -453,7 +453,7 @@ def validate(net, val_data, async_eval_processes, ctx, eval_metric, logger, epoc
             save_params(net, logger, best_map, current_map, epoch, args.save_interval,
                         args.save_prefix)
 
-    if not args.herring or hvd.rank() == 0:
+    if not args.smdataparallel or dist.rank() == 0:
         p = Process(target=coco_eval_save_task, args=(eval_metric, logger))
         async_eval_processes.append(p)
         p.start()
@@ -476,8 +476,8 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
         optimizer_params['clip_gradient'] = args.clip_gradient
     if args.amp:
         optimizer_params['multi_precision'] = True
-    if args.herring:
-        trainer = hvd.DistributedTrainer(
+    if args.smdataparallel:
+        trainer = dist.DistributedTrainer(
             net.collect_train_params(),  # fix batchnorm, fix first stage, etc...
             'sgd',
             optimizer_params
@@ -530,7 +530,7 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
     for epoch in range(args.start_epoch, args.epochs):
         rcnn_task = ForwardBackwardTask(net, trainer, rpn_cls_loss, rpn_box_loss, rcnn_cls_loss,
                                         rcnn_box_loss, rcnn_mask_loss, args.amp)
-        executor = Parallel(args.executor_threads, rcnn_task) if not args.herring else None
+        executor = Parallel(args.executor_threads, rcnn_task) if not args.smdataparallel else None
         if not args.disable_hybridization:
             net.hybridize(static_alloc=args.static_alloc)
         while lr_steps and epoch >= lr_steps[0]:
@@ -566,7 +566,7 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
                     result = executor.get()
                 else:
                     result = rcnn_task.forward_backward(list(zip(*batch))[0])
-                if (not args.herring) or hvd.rank() == 0:
+                if (not args.smdataparallel) or dist.rank() == 0:
                     for k in range(len(metric_losses)):
                         metric_losses[k].append(result[k])
                     for k in range(len(add_losses)):
@@ -584,14 +584,14 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
                 for pred in records:
                     metric.update(pred[0], pred[1])
             trainer.step(batch_size)
-            if (not args.herring or hvd.rank() == 0) and args.log_interval \
+            if (not args.smdataparallel or dist.rank() == 0) and args.log_interval \
                     and not (i + 1) % args.log_interval:
                 msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics + metrics2])
                 logger.info('[Epoch {}][Batch {}], Speed: {:.3f} samples/sec, {}'.format(
                     epoch, i, args.log_interval * args.batch_size / (time.time() - btic), msg))
                 btic = time.time()
         # validate and save params
-        if (not args.herring) or hvd.rank() == 0:
+        if (not args.smdataparallel) or dist.rank() == 0:
             msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics])
             logger.info('[Epoch {}] Training cost: {:.3f}, {}'.format(
                 epoch, (time.time() - tic), msg))
@@ -599,7 +599,7 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
             # consider reduce the frequency of validation to save time
             validate(net, val_data, async_eval_processes, ctx, eval_metric, logger, epoch, best_map,
                      args)
-        elif (not args.herring) or hvd.rank() == 0:
+        elif (not args.smdataparallel) or dist.rank() == 0:
             current_map = 0.
             save_params(net, logger, best_map, current_map, epoch, args.save_interval,
                         args.save_prefix)
@@ -615,20 +615,24 @@ if __name__ == '__main__':
     if args.amp:
         amp.init()
 
+    if args.smdataparallel:
+        # Initialize smdistributed.dataparallel
+        dist.init()
+
     # training contexts
-    if args.herring:
-        ctx = [mx.gpu(hvd.local_rank())]
+    if args.smdataparallel:
+        ctx = [mx.gpu(dist.local_rank())]
     else:
         ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
         ctx = ctx if ctx else [mx.cpu()]
 
-    if args.herring:
+    if args.smdataparallel:
         # get around race condition in model_store for creating pretrain model folder
         root = os.path.join('~', '.mxnet', 'models')
         if 'MXNET_HOME' in os.environ:
             root = os.path.join(os.environ['MXNET_HOME'], 'models')
         root = os.path.expanduser(root)
-        if hvd.local_rank() == 0 and not os.path.exists(root):
+        if dist.local_rank() == 0 and not os.path.exists(root):
             os.makedirs(root)
 
     # network
@@ -640,7 +644,7 @@ if __name__ == '__main__':
         module_list.append(args.norm_layer)
         if args.norm_layer == 'bn':
             kwargs['num_devices'] = len(ctx)
-    num_gpus = hvd.size() if args.herring else len(ctx)
+    num_gpus = dist.size() if args.smdataparallel else len(ctx)
     net_name = '_'.join(('mask_rcnn', *module_list, args.network, args.dataset))
     if args.custom_model:
         args.use_fpn = True
@@ -710,7 +714,7 @@ if __name__ == '__main__':
         net.collect_params('.*normalizedperclassboxcenterencoder.*').setattr('dtype', 'float32')
 
     # Get the MPI worker communicator for distributed validation
-    worker_comm = hvd.get_worker_comm()
+    worker_comm = dist.get_worker_comm()
 
     # set up logger
     logging.basicConfig()
@@ -725,13 +729,13 @@ if __name__ == '__main__':
 
     # training data
     train_dataset, val_dataset, eval_metric = get_dataset(args.dataset, args)
-    batch_size = args.batch_size // num_gpus if args.herring else args.batch_size
+    batch_size = args.batch_size // num_gpus if args.smdataparallel else args.batch_size
     train_data, val_data = get_dataloader(
         net, train_dataset, val_dataset, MaskRCNNDefaultTrainTransform,
         MaskRCNNDefaultValTransform,
         batch_size, len(ctx), args)
 
-    hvd.attach_dataloader([train_data, val_data])
+    dist.attach_dataloader([train_data, val_data])
 
     # training
     train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)

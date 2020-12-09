@@ -26,9 +26,9 @@ from gluoncv.utils.metrics.accuracy import Accuracy
 from mxnet.contrib import amp
 
 try:
-    import herring.mxnet as hvd
+    import smdistributed.dataparallel.mxnet as dist
 except ImportError:
-    hvd = None
+    dist = None
 
 try:
     from nvidia.dali.plugin.mxnet import DALIGenericIterator
@@ -89,21 +89,19 @@ def parse_args():
                         'Currently supports only COCO.')
     parser.add_argument('--amp', action='store_true',
                         help='Use MXNet AMP for mixed precision training.')
-    parser.add_argument('--herring', action='store_true',
-                        help='Use MXNet Herring for distributed training. Must be run with OpenMPI. '
-                        '--gpus is ignored when using --herring.')
+    parser.add_argument('--smdataparallel', action='store_true',
+                        help='Use smdistributed.dataparallel MXNet for distributed training. Must be run with OpenMPI. '
+                        '--gpus is ignored when using --smdataparallel.')
 
     args = parser.parse_args()
-    #if args.horovod:
-    #    assert hvd, "You are trying to use horovod support but it's not installed"
     return args
 
 def get_dataset(dataset, args):
     if dataset.lower() == 'voc':
-        train_dataset = gdata.VOCDetection(
-            splits=[(2007, 'trainval'), (2012, 'trainval')])
-        val_dataset = gdata.VOCDetection(
-            splits=[(2007, 'test')])
+        train_dataset = gdata.VOCDetection(root=args.dataset_root,
+                                           splits=[(2007, 'trainval'), (2012, 'trainval')])
+        val_dataset = gdata.VOCDetection(root=args.dataset_root,
+                                         splits=[(2007, 'test')])
         val_metric = VOC07MApMetric(iou_thresh=0.5, class_names=val_dataset.classes)
     elif dataset.lower() == 'coco':
         train_dataset = gdata.COCODetection(root=args.dataset_root, splits='instances_train2017')
@@ -129,8 +127,8 @@ def get_dataloader(net, train_dataset, val_dataset, data_shape, batch_size, num_
     train_sampler = \
         gcv.nn.sampler.SplitSortedBucketSampler(train_dataset.get_im_aspect_ratio(),
                                                 batch_size,
-                                                num_parts=hvd.size() if args.herring else 1,
-                                                part_index=hvd.rank() if args.herring else 0,
+                                                num_parts=dist.size() if args.smdataparallel else 1,
+                                                part_index=dist.rank() if args.smdataparallel else 0,
                                                 shuffle=True)
     train_loader = gluon.data.DataLoader(
         train_dataset.transform(SSDDefaultTrainTransform(width, height, anchors)),
@@ -147,15 +145,15 @@ def get_dali_dataset(dataset_name, devices, args):
         expanded_file_root = os.path.expanduser(args.dataset_root)
         coco_root = os.path.join(expanded_file_root, 'train2017')
         coco_annotations = os.path.join(expanded_file_root, 'annotations', 'instances_train2017.json')
-        if args.herring:
-            train_dataset = [gdata.COCODetectionDALI(num_shards=hvd.size(), shard_id=hvd.rank(), file_root=coco_root,
-                                                     annotations_file=coco_annotations, device_id=hvd.local_rank())]
+        if args.smdataparallel:
+            train_dataset = [gdata.COCODetectionDALI(num_shards=dist.size(), shard_id=dist.rank(), file_root=coco_root,
+                                                     annotations_file=coco_annotations, device_id=dist.local_rank())]
         else:
             train_dataset = [gdata.COCODetectionDALI(num_shards= len(devices), shard_id=i, file_root=coco_root,
                                                      annotations_file=coco_annotations, device_id=i) for i, _ in enumerate(devices)]
 
         # validation
-        if (not args.herring or hvd.rank() == 0):
+        if (not args.smdataparallel or dist.rank() == 0):
             val_dataset = gdata.COCODetection(root=os.path.join(args.dataset_root),
                                               splits='instances_val2017',
                                               skip_empty=False)
@@ -170,15 +168,15 @@ def get_dali_dataset(dataset_name, devices, args):
 
     return train_dataset, val_dataset, val_metric
 
-def get_dali_dataloader(net, train_dataset, val_dataset, data_shape, global_batch_size, num_workers, devices, ctx, herring):
+def get_dali_dataloader(net, train_dataset, val_dataset, data_shape, global_batch_size, num_workers, devices, ctx, smdataparallel):
     width, height = data_shape, data_shape
     with autograd.train_mode():
         _, _, anchors = net(mx.nd.zeros((1, 3, height, width), ctx=ctx))
     anchors = anchors.as_in_context(mx.cpu())
 
-    if herring:
-        batch_size = global_batch_size // hvd.size()
-        pipelines = [SSDDALIPipeline(device_id=hvd.local_rank(), batch_size=batch_size,
+    if smdataparallel:
+        batch_size = global_batch_size // dist.size()
+        pipelines = [SSDDALIPipeline(device_id=dist.local_rank(), batch_size=batch_size,
                                      data_shape=data_shape, anchors=anchors,
                                      num_workers=num_workers, dataset_reader = train_dataset[0])]
     else:
@@ -190,15 +188,15 @@ def get_dali_dataloader(net, train_dataset, val_dataset, data_shape, global_batc
                                      dataset_reader = train_dataset[i]) for i, device_id in enumerate(devices)]
 
     epoch_size = train_dataset[0].size()
-    if herring:
-        epoch_size //= hvd.size()
+    if smdataparallel:
+        epoch_size //= dist.size()
     train_loader = DALIGenericIterator(pipelines, [('data', DALIGenericIterator.DATA_TAG),
                                                     ('bboxes', DALIGenericIterator.LABEL_TAG),
                                                     ('label', DALIGenericIterator.LABEL_TAG)],
                                                     epoch_size, auto_reset=True)
 
     # validation
-    if (not herring or hvd.rank() == 0):
+    if (not smdataparallel or dist.rank() == 0):
         val_batchify_fn = Tuple(Stack(), Pad(pad_val=-1))
         val_loader = gluon.data.DataLoader(
             val_dataset.transform(SSDDefaultValTransform(width, height)),
@@ -254,9 +252,9 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
     """Training pipeline"""
     net.collect_params().reset_ctx(ctx)
 
-    if args.herring:
-        #hvd.broadcast_parameters(net.collect_params(), root_rank=0)
-        trainer = hvd.DistributedTrainer(
+    if args.smdataparallel:
+        #dist.broadcast_parameters(net.collect_params(), root_rank=0)
+        trainer = dist.DistributedTrainer(
                         net.collect_params(), 'sgd',
                         {'learning_rate': args.lr, 'wd': args.wd, 'momentum': args.momentum})
     else:
@@ -333,8 +331,8 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
             # by batch-size anymore
             trainer.step(1)
 
-            if (not args.herring or hvd.rank() == 0):
-                local_batch_size = int(args.batch_size // (hvd.size() if args.herring else 1))
+            if (not args.smdataparallel or dist.rank() == 0):
+                local_batch_size = int(args.batch_size // (dist.size() if args.smdataparallel else 1))
                 ce_metric.update(0, [l * local_batch_size for l in cls_loss])
                 smoothl1_metric.update(0, [l * local_batch_size for l in box_loss])
                 if args.log_interval and not (i + 1) % args.log_interval:
@@ -344,7 +342,7 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
                         epoch, i, args.log_interval * args.batch_size / (time.time() - btic), name1, loss1, name2, loss2))
                     btic = time.time()
 
-        if (not args.herring or hvd.rank() == 0):
+        if (not args.smdataparallel or dist.rank() == 0):
             name1, loss1 = ce_metric.get()
             name2, loss2 = smoothl1_metric.get()
             time_epoch = time.time()-tic
@@ -361,7 +359,7 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
                 current_map = 0.
             save_params(net, best_map, current_map, epoch, args.save_interval, args.save_prefix)
 
-    if hvd.rank() == 0:
+    if dist.rank() == 0:
         logging.info('Total Training Time: %d Seconds', total_time)
 
 if __name__ == '__main__':
@@ -370,27 +368,28 @@ if __name__ == '__main__':
     if args.amp:
         amp.init()
 
-    #if args.horovod:
-    #    hvd.init()
+    if args.smdataparallel:
+        # Initialize smdistributed.dataparallel
+        dist.init()
 
     # fix seed for mxnet, numpy and python builtin random generator.
     gutils.random.seed(args.seed)
 
     # training contexts
-    if args.herring:
-        ctx = [mx.gpu(hvd.local_rank())]
+    if args.smdataparallel:
+        ctx = [mx.gpu(dist.local_rank())]
     else:
         ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
         ctx = ctx if ctx else [mx.cpu()]
 
     # network
-    if args.herring:
+    if args.smdataparallel:
         # get around race condition in model_store for creating pretrain model folder
         root = os.path.join('~', '.mxnet', 'models')
         if 'MXNET_HOME' in os.environ:
             root = os.path.join(os.environ['MXNET_HOME'], 'models')
         root = os.path.expanduser(root)
-        if hvd.local_rank() == 0 and not os.path.exists(root):
+        if dist.local_rank() == 0 and not os.path.exists(root):
             os.makedirs(root)
 
     net_name = '_'.join(('ssd', str(args.data_shape), args.network, args.dataset))
@@ -421,15 +420,15 @@ if __name__ == '__main__':
         train_dataset, val_dataset, eval_metric = get_dali_dataset(args.dataset, devices, args)
         train_data, val_data = get_dali_dataloader(
             async_net, train_dataset, val_dataset, args.data_shape, args.batch_size, args.num_workers,
-            devices, ctx[0], args.herring)
+            devices, ctx[0], args.smdataparallel)
     else:
         train_dataset, val_dataset, eval_metric = get_dataset(args.dataset, args)
-        batch_size = (args.batch_size // hvd.size()) if args.herring else args.batch_size
+        batch_size = (args.batch_size // dist.size()) if args.smdataparallel else args.batch_size
         train_data, val_data = get_dataloader(
             async_net, train_dataset, val_dataset, args.data_shape, batch_size, args.num_workers, ctx[0])
 
 
-    hvd.attach_dataloader([train_data, val_data])
+    dist.attach_dataloader([train_data, val_data])
     # training
     train(net, train_data, val_data, eval_metric, ctx, args)
 
