@@ -392,7 +392,7 @@ def train_gluon():
         for k, v in net.collect_params('.*beta|.*gamma|.*bias').items():
             v.wd_mult = 0.0
 
-    # Fetch and broadcast parameters
+    # Fetch the parameters
     params = net.collect_params()
 
     # Create optimizer

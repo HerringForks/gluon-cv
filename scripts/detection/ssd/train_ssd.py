@@ -253,7 +253,6 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
     net.collect_params().reset_ctx(ctx)
 
     if args.smdataparallel:
-        #dist.broadcast_parameters(net.collect_params(), root_rank=0)
         trainer = dist.DistributedTrainer(
                         net.collect_params(), 'sgd',
                         {'learning_rate': args.lr, 'wd': args.wd, 'momentum': args.momentum})
