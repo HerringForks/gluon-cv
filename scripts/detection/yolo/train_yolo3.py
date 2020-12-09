@@ -24,9 +24,9 @@ from gluoncv.utils import LRScheduler, LRSequential
 
 from mxnet.contrib import amp
 try:
-    import herring.mxnet as hvd
+    import smdistributed.dataparallel.mxnet as dist
 except ImportError:
-    hvd = None
+    dist = None
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train YOLO networks with random input shape.')
@@ -35,6 +35,8 @@ def parse_args():
     parser.add_argument('--data-shape', type=int, default=416,
                         help="Input data shape for evaluation, use 320, 416, 608... " +
                              "Training is with random shapes from (320 to 608).")
+    parser.add_argument('--dataset-root', type=str, default='~/.mxnet/datasets/',
+                        help='Path of the directory where the dataset is located.')
     parser.add_argument('--batch-size', type=int, default=64,
                         help='Training mini-batch size')
     parser.add_argument('--dataset', type=str, default='voc',
@@ -97,23 +99,23 @@ def parse_args():
     parser.add_argument('--label-smooth', action='store_true', help='Use label smoothing.')
     parser.add_argument('--amp', action='store_true',
                         help='Use MXNet AMP for mixed precision training.')
-    parser.add_argument('--herring', action='store_true',
-                        help='Use MXNet Herring for distributed training. Must be run with OpenMPI. '
-                        '--gpus is ignored when using --herring.')
+    parser.add_argument('--smdataparallel', action='store_true',
+                        help='Use smdistributed.dataparallel MXNet for distributed training. Must be run with OpenMPI. '
+                        '--gpus is ignored when using --smdataparallel.')
 
     args = parser.parse_args()
     return args
 
 def get_dataset(dataset, args):
     if dataset.lower() == 'voc':
-        train_dataset = gdata.VOCDetection(
-            splits=[(2007, 'trainval'), (2012, 'trainval')])
-        val_dataset = gdata.VOCDetection(
-            splits=[(2007, 'test')])
+        train_dataset = gdata.VOCDetection(root=args.dataset_root,
+                                           splits=[(2007, 'trainval'), (2012, 'trainval')])
+        val_dataset = gdata.VOCDetection(root=args.dataset_root,
+                                         splits=[(2007, 'test')])
         val_metric = VOC07MApMetric(iou_thresh=0.5, class_names=val_dataset.classes)
     elif dataset.lower() == 'coco':
-        train_dataset = gdata.COCODetection(splits='instances_train2017', use_crowd=False)
-        val_dataset = gdata.COCODetection(splits='instances_val2017', skip_empty=False)
+        train_dataset = gdata.COCODetection(root=args.dataset_root, splits='instances_train2017', use_crowd=False)
+        val_dataset = gdata.COCODetection(root=args.dataset_root, splits='instances_val2017', skip_empty=False)
         val_metric = COCODetectionMetric(
             val_dataset, args.save_prefix + '_eval', cleanup=True,
             data_shape=(args.data_shape, args.data_shape))
@@ -138,8 +140,8 @@ def get_dataloader(net, train_dataset, val_dataset, data_shape, batch_size, num_
     train_sampler = \
         gcv.nn.sampler.SplitSortedBucketSampler(im_aspect_ratio,
                                                 batch_size,
-                                                num_parts=hvd.size() if args.herring else 1,
-                                                part_index=hvd.rank() if args.herring else 0,
+                                                num_parts=dist.size() if args.smdataparallel else 1,
+                                                part_index=dist.rank() if args.smdataparallel else 0,
                                                 shuffle=True)
     if args.no_random_shape:
         train_loader = gluon.data.DataLoader(
@@ -224,9 +226,8 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
                     step_factor=args.lr_decay, power=2),
     ])
 
-    if args.herring:
-        #hvd.broadcast_parameters(net.collect_params(), root_rank=0)
-        trainer = hvd.DistributedTrainer(
+    if args.smdataparallel:
+        trainer = dist.DistributedTrainer(
                         net.collect_params(), 'sgd',
                         {'wd': args.wd, 'momentum': args.momentum, 'lr_scheduler': lr_scheduler})
     else:
@@ -302,7 +303,7 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
                 else:
                     autograd.backward(sum_losses)
             trainer.step(batch_size)
-            if (not args.herring or hvd.rank() == 0):
+            if (not args.smdataparallel or dist.rank() == 0):
                 obj_metrics.update(0, obj_losses)
                 center_metrics.update(0, center_losses)
                 scale_metrics.update(0, scale_losses)
@@ -316,7 +317,7 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
                         epoch, i, trainer.learning_rate, args.log_interval * args.batch_size / (time.time() - btic), name1, loss1, name2, loss2, name3, loss3, name4, loss4))
                     btic = time.time()
 
-        if (not args.herring or hvd.rank() == 0):
+        if (not args.smdataparallel or dist.rank() == 0):
             name1, loss1 = obj_metrics.get()
             name2, loss2 = center_metrics.get()
             name3, loss3 = scale_metrics.get()
@@ -339,18 +340,19 @@ if __name__ == '__main__':
     if args.amp:
         amp.init()
 
-    if args.herring:
-        if hvd is None:
-            raise SystemExit("Horovod not found, please check if you installed it correctly.")
-        #hvd.init()
+    if args.smdataparallel:
+        if dist is None:
+            raise SystemExit("smdistributed.dataparallel not found, please check if you installed it correctly.")
+        # Initialize smdistributed.dataparallel
+        dist.init()
 
     # fix seed for mxnet, numpy and python builtin random generator.
     gutils.random.seed(args.seed)
 
 
     # training contexts
-    if args.herring:
-        ctx = [mx.gpu(hvd.local_rank())]
+    if args.smdataparallel:
+        ctx = [mx.gpu(dist.local_rank())]
     else:
         ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
         ctx = ctx if ctx else [mx.cpu()]
@@ -376,11 +378,11 @@ if __name__ == '__main__':
             async_net.initialize()
 
     # training data
-    batch_size = (args.batch_size // hvd.size()) if args.herring else args.batch_size
+    batch_size = (args.batch_size // dist.size()) if args.smdataparallel else args.batch_size
     train_dataset, val_dataset, eval_metric = get_dataset(args.dataset, args)
     train_data, val_data = get_dataloader(
         async_net, train_dataset, val_dataset, args.data_shape, batch_size, args.num_workers, args)
 
-    hvd.attach_dataloader([train_data, val_data])
+    dist.attach_dataloader([train_data, val_data])
     # training
     train(net, train_data, val_data, eval_metric, ctx, args)

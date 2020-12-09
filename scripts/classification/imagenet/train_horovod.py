@@ -47,28 +47,16 @@ from mxnet.gluon.data.vision import transforms
 from PIL import Image
 
 try:
-    import horovod.mxnet as dist
-    horovod_mode = True
-except:
-    horovod_mode = False
-    pass
-
-try:
-    import herring.mxnet as dist
-    herring_mode = True
-except:
-    herring_mode = False
-    pass
-
-try:
-    from mpi4py import MPI
+    import smdistributed.dataparallel.mxnet as dist
 except ImportError:
-    logging.info('mpi4py is not installed. Use "pip install --no-cache mpi4py" to install')
-    MPI = None
+    dist = None
 
-if horovod_mode == False and herring_mode == False:
-    logging.info('Neither Hovorod or Herring is installed. Exiting')
-    exit(0)
+if not dist:
+    try:
+        from mpi4py import MPI
+    except ImportError:
+        logging.info('mpi4py is not installed. Use "pip install --no-cache mpi4py" to install')
+        MPI = None
 
 # Training settings
 parser = argparse.ArgumentParser(description='MXNet ImageNet Example',
@@ -155,14 +143,17 @@ parser.add_argument('--auto_aug', action='store_true',
                     help='use auto_aug. default is false.')
 parser.add_argument('--use_avd', action='store_true',
                     help='use avd. default is false.')
+parser.add_argument('--smdataparallel', action='store_true',
+                        help='Use smdistributed.dataparallel MXNet for distributed training. Must be run with OpenMPI. '
+                        '--gpus is ignored when using --smdataparallel.')
 
 args = parser.parse_args()
 
 # fix seed for mxnet, numpy and python builtin random generator.
 gutils.random.seed(args.seed)
 
-# Horovod & Herring: initialize
-if horovod_mode:
+# Initialize smdistributed.dataparallel
+if args.smdataparallel:
     dist.init()
 num_workers = dist.size()
 rank = dist.rank()
@@ -309,7 +300,7 @@ def get_val_data(rec_val, batch_size, data_nthreads, input_size, crop_ratio):
 
     return val_data, val_batch_fn
 
-# Horovod & Herring: pin GPU to local rank
+# Pin GPU to local rank
 context = mx.cpu(local_rank) if args.no_cuda else mx.gpu(local_rank)
 
 #def get_train_data(rec_train, batch_size, data_nthreads, input_size, crop_ratio, args):
@@ -318,7 +309,7 @@ train_data, train_batch_fn = get_train_data(args.rec_train, batch_size, args.dat
 val_data, val_batch_fn = get_val_data(args.rec_val, batch_size, args.data_nthreads, args.input_size,
                                       args.crop_ratio)
 
-if herring_mode:
+if args.smdataparallel:
     dist.attach_dataloader([train_data, val_data])
 
 # Get model from GluonCV model zoo
@@ -327,7 +318,7 @@ kwargs = {'ctx': context,
           'pretrained': args.use_pretrained,
           'classes': num_classes}
 
-if horovod_mode:
+if not args.smdataparallel:
     kwargs['input_size'] = args.input_size
 
 if args.last_gamma:
@@ -374,8 +365,8 @@ def train_gluon():
         top5_name, top5_acc = acc_top5.get()
         comm = None
 
-        # Horovod & Herring: activate distributed validation
-        if horovod_mode and MPI is not None:
+        # Activate distributed validation
+        if not args.smdataparallel and MPI is not None:
             comm = MPI.COMM_WORLD
         else:
             comm = dist.get_worker_comm()
@@ -401,10 +392,8 @@ def train_gluon():
         for k, v in net.collect_params('.*beta|.*gamma|.*bias').items():
             v.wd_mult = 0.0
 
-    # Horovod: fetch and broadcast parameters
+    # Fetch the parameters
     params = net.collect_params()
-    if horovod_mode and params is not None:
-        dist.broadcast_parameters(params, root_rank=0)
 
     # Create optimizer
     optimizer = 'nag'
@@ -415,7 +404,7 @@ def train_gluon():
         optimizer_params['multi_precision'] = True
     opt = mx.optimizer.create(optimizer, **optimizer_params)
 
-    # Horovod & Herring: create DistributedTrainer, a subclass of gluon.Trainer
+    # Create DistributedTrainer, a subclass of gluon.Trainer
     trainer = dist.DistributedTrainer(params, opt)
     if args.resume_states is not '':
         trainer.load_states(args.resume_states)
