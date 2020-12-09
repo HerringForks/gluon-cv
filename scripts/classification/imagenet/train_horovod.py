@@ -300,7 +300,7 @@ def get_val_data(rec_val, batch_size, data_nthreads, input_size, crop_ratio):
 
     return val_data, val_batch_fn
 
-# Horovod & Herring: pin GPU to local rank
+# Pin GPU to local rank
 context = mx.cpu(local_rank) if args.no_cuda else mx.gpu(local_rank)
 
 #def get_train_data(rec_train, batch_size, data_nthreads, input_size, crop_ratio, args):
@@ -365,7 +365,7 @@ def train_gluon():
         top5_name, top5_acc = acc_top5.get()
         comm = None
 
-        # Horovod & Herring: activate distributed validation
+        # Activate distributed validation
         if not args.smdataparallel and MPI is not None:
             comm = MPI.COMM_WORLD
         else:
@@ -392,10 +392,8 @@ def train_gluon():
         for k, v in net.collect_params('.*beta|.*gamma|.*bias').items():
             v.wd_mult = 0.0
 
-    # Horovod: fetch and broadcast parameters
+    # Fetch and broadcast parameters
     params = net.collect_params()
-    # if args.smdataparallel and params is not None:
-    #     dist.broadcast_parameters(params, root_rank=0)
 
     # Create optimizer
     optimizer = 'nag'
@@ -406,7 +404,7 @@ def train_gluon():
         optimizer_params['multi_precision'] = True
     opt = mx.optimizer.create(optimizer, **optimizer_params)
 
-    # Horovod & Herring: create DistributedTrainer, a subclass of gluon.Trainer
+    # Create DistributedTrainer, a subclass of gluon.Trainer
     trainer = dist.DistributedTrainer(params, opt)
     if args.resume_states is not '':
         trainer.load_states(args.resume_states)

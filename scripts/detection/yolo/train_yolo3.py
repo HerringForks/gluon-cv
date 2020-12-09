@@ -227,7 +227,6 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
     ])
 
     if args.smdataparallel:
-        #dist.broadcast_parameters(net.collect_params(), root_rank=0)
         trainer = dist.DistributedTrainer(
                         net.collect_params(), 'sgd',
                         {'wd': args.wd, 'momentum': args.momentum, 'lr_scheduler': lr_scheduler})
