@@ -336,7 +336,7 @@ def get_dataloader(net, train_dataset, val_dataset, train_transform, val_transfo
                                                 shuffle=True)
     train_loader = mx.gluon.data.DataLoader(train_dataset.transform(
         train_transform(net.short, net.max_size, net, ashape=net.ashape, multi_stage=args.use_fpn)),
-        batch_sampler=train_sampler, batchify_fn=train_bfn, num_workers=args.num_workers)
+        batch_sampler=train_sampler, batchify_fn=train_bfn, num_workers=args.num_workers, thread_pool=True)
     val_bfn = batchify.Tuple(*[batchify.Append() for _ in range(2)])
     short = net.short[-1] if isinstance(net.short, (tuple, list)) else net.short
     # validation use 1 sample per device
@@ -635,6 +635,14 @@ if __name__ == '__main__':
     else:
         ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
         ctx = ctx if ctx else [mx.cpu()]
+    if args.horovod:
+        # get around race condition in model_store for creating pretrain model folder
+        root = os.path.join('~', '.mxnet', 'models')
+        if 'MXNET_HOME' in os.environ:
+            root = os.path.join(os.environ['MXNET_HOME'], 'models')
+        root = os.path.expanduser(root)
+        if hvd.local_rank() == 0 and not os.path.exists(root):
+            os.makedirs(root)
 
     # network
     kwargs = {}
@@ -733,6 +741,7 @@ if __name__ == '__main__':
     train_data, val_data = get_dataloader(
         net, train_dataset, val_dataset, MaskRCNNDefaultTrainTransform, MaskRCNNDefaultValTransform,
         batch_size, len(ctx), args)
+
 
     # training
     train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
