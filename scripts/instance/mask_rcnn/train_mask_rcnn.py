@@ -11,6 +11,9 @@ os.environ['MXNET_EXEC_BULK_EXEC_MAX_NODE_TRAIN_BWD'] = '25'
 os.environ['MXNET_GPU_COPY_NTHREADS'] = '1'
 os.environ['MXNET_OPTIMIZER_AGGREGATION_SIZE'] = '54'
 os.environ['MXNET_USE_FUSION'] = '0'
+# ensures accumulation is done in data type of higher precision than the input data type, leading to more accurate accumulation
+# refer https://mxnet.apache.org/versions/1.7.0/api/faq/env_var
+os.environ['MXNET_SAFE_ACCUMULATION'] = '1'
 
 import logging
 import time
