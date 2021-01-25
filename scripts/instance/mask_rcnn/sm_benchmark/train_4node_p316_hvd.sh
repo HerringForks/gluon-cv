@@ -6,10 +6,10 @@ python train_mask_rcnn_hvd.py --train-datapath /opt/ml/input/data/train/data/mxn
 --lr-decay-epoch 8,10 \
 --epochs 4 \
 --log-interval 100 \
---val-interval 12 \
---batch-size 128 \
+--val-interval 1 \
+--batch-size 32 \
 --use-fpn \
---lr 0.16 \
+--lr 0.08 \
 --lr-warmup-factor 0.001 \
 --lr-warmup 1600 \
 --static-alloc \

@@ -412,9 +412,6 @@ def validate(net, val_data, async_eval_processes, ctx, eval_metric, logger, epoc
         # update metric
         for det_bbox_og, det_id_og, det_score_og, det_mask_og, det_info_og in zip(det_bboxes, det_ids, det_scores,
                                                                    det_masks, det_infos):
-            print(f'det info: {det_info_og.shape}')
-            print('bbox shape')
-            print(det_bbox_og.shape)
             for i in range(det_info_og.shape[0]):
                 # numpy everything
                 det_bbox = det_bbox_og[i].asnumpy()
@@ -545,6 +542,8 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
             metric.reset()
         tic = time.time()
         btic = time.time()
+        speed = []
+        avg_batch_speed = 0
         train_data_iter = iter(train_data)
         next_data_batch = next(train_data_iter)
         next_data_batch = split_and_load(next_data_batch, ctx_list=ctx)
@@ -590,14 +589,18 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
             if (not args.smdataparallel or dist.rank() == 0) and args.log_interval \
                     and not (i + 1) % args.log_interval:
                 msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics + metrics2])
+                batch_speed = args.log_interval * args.batch_size / (time.time() - btic)
+                speed.append(batch_speed)
                 logger.info('[Epoch {}][Batch {}], Speed: {:.3f} samples/sec, {}'.format(
-                    epoch, i, args.log_interval * args.batch_size / (time.time() - btic), msg))
+                    epoch, i, batch_speed, msg))
                 btic = time.time()
+        if speed:
+            avg_batch_speed = sum(speed)/len(speed)
         # validate and save params
         if (not args.smdataparallel) or dist.rank() == 0:
             msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics])
-            logger.info('[Epoch {}] Training cost: {:.3f}, {}'.format(
-                epoch, (time.time() - tic), msg))
+            logger.info('[Epoch {}] Training cost: {:.3f}, Speed: {:.3f} samples/sec, {}'.format(
+                epoch, (time.time() - tic), avg_batch_speed, msg))
         if not (epoch + 1) % args.val_interval:
             # consider reduce the frequency of validation to save time
             validate(net, val_data, async_eval_processes, ctx, eval_metric, logger, epoch, best_map,

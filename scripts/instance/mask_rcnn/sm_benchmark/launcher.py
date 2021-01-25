@@ -22,12 +22,16 @@ print(role)
 instance_type = args.instance_type#"ml.p3dn.24xlarge" # Other supported instance type: ml.p3.16xlarge
 instance_count = args.instance_count#8 # You can use 2, 4, 8 etc.
 #docker_image = "578276202366.dkr.ecr.us-east-1.amazonaws.com/bapac-mxnet-herring-sagemaker:1.8.0-gpu-py37-cu110-ubuntu16.04-2021-01-15-maskrcnn"
-docker_image = "578276202366.dkr.ecr.us-east-1.amazonaws.com/bapac-mxnet-herring-sagemaker:1.8.0-gpu-py37-cu110-ubuntu16.04-gluoncv-0.9.0-maskrcnn"
+#docker_image = "578276202366.dkr.ecr.us-east-1.amazonaws.com/bapac-mxnet-herring-sagemaker:1.8.0-gpu-py37-cu110-ubuntu16.04-gluoncv-0.9.0-maskrcnn"
+#docker_image = "578276202366.dkr.ecr.us-east-1.amazonaws.com/bapac-mxnet-herring-sagemaker:1.8.0-gpu-py37-cu110-ubuntu16.04-gluoncv-0.9.0-maskrcnn-inference-bs1"
+#docker_image = "578276202366.dkr.ecr.us-east-1.amazonaws.com/bapac-mxnet-herring-sagemaker:1.8.0-gpu-py37-cu110-ubuntu16.04-2021-01-15-maskrcnn-smtoolkit"
+docker_image = "578276202366.dkr.ecr.us-east-1.amazonaws.com/bapac-mxnet-herring-sagemaker:1.8.0-gpu-py37-cu110-ubuntu16.04-2021-01-22-maskrcnn-smtoolkit"
+
 region = 'us-east-1' # Example: us-west-2
 username = 'AWS'
 #subnets=['subnet-082ed43dd11d6c4ab']
 #security_group_ids=['sg-01a3bc0056722f294']
-job_name = f"bapac-mxnet-gluoncv090-smdataparallel-mrcnn-fsx-180-{instance_count}-node"
+job_name = f"bapac-mx-gcv090-smddp-mrcnn-{instance_count}-node"
 #file_system_id= 'fs-003a44fb382f07c6a'
 
 #subnets=['subnet-0aa3705a25ebd8b81']
@@ -37,15 +41,40 @@ job_name = f"bapac-mxnet-gluoncv090-smdataparallel-mrcnn-fsx-180-{instance_count
 subnets=['subnet-02da219d37e84a7af']
 security_group_ids=['sg-01a3bc0056722f294']
 file_system_id='fs-0c3b35d305333fa2e'
-
+hyperparams={}
 if args.dist=='smdataparallel':
     distribution={'smdistributed':{'dataparallel':{'enabled': True}}}
-    entry_point='train_p3dn.sh'
+    if instance_type == "ml.p3.16xlarge":
+        entry_point='train_'+str(instance_count)+'node_p316.sh'
+    else:
+        entry_point='train_'+str(instance_count)+'node.sh'
+    hyperparams["smdataparallel"]=""
 elif args.dist=='horovod':
     distribution={'mpi': {'enabled': True, "custom_mpi_options": "-verbose --NCCL_DEBUG=INFO"}}
-    entry_point='train_p3dn_hvd.sh'
+    if instance_type == "ml.p3.16xlarge":
+        entry_point='train_'+str(instance_count)+'node_p316_hvd.sh'
+    else:
+        entry_point='train_'+str(instance_count)+'node_hvd.sh'
+    hyperparams["horovod"]=""
 else:
     raise ValueError(f"incorrect dist parameter {args.dist}")
+# per device
+batch_size_per_gpu = 2
+base_lr = 0.00125
+if instance_type in ["ml.p3dn.24xlarge", "ml.p3.16xlarge", "ml.p4d.24xlarge"]:
+    num_gpus = 8
+else:
+    raise ValueError(f"incorrect instance type {instance_type}")
+#if instance_count == 8:
+#    batch_size = instance_count * num_gpus
+#else:
+#    batch_size = instance_count * num_gpus * batch_size_per_gpu
+#hyperparams["lr"] = base_lr * batch_size
+#hyperparams["batch_size"] = batch_size
+#print(f"hyperparameters are {hyperparams}")
+print(f"instance type {instance_type}")
+print(f"instance count {instance_count}")
+print(f"entrypoint {entry_point}")
 estimator = MXNet(entry_point=entry_point,
                         role=role,
                         image_uri=docker_image,
@@ -59,6 +88,7 @@ estimator = MXNet(entry_point=entry_point,
                         debugger_hook_config=False,
                         # Training using SMDataParallel Distributed Training Framework
                         distribution=distribution
+    #                    hyperparameters=hyperparams
                    )
 
 # Configure FSx Input for your SageMaker Training job

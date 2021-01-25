@@ -7,9 +7,9 @@ python train_mask_rcnn.py --train-datapath /opt/ml/input/data/train/data/mxnet/m
 --epochs 4 \
 --log-interval 100 \
 --val-interval 1 \
---batch-size 128 \
+--batch-size 8 \
 --use-fpn \
---lr 0.16 \
+--lr 0.02 \
 --lr-warmup-factor 0.001 \
 --lr-warmup 1600 \
 --static-alloc \

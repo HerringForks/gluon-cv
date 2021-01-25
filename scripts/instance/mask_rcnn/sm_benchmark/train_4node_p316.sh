@@ -1,4 +1,4 @@
-python train_mask_rcnn_herring.py --resume mask_rcnn_fpn_resnet50_v1b_coco_0011_0.0000.params --train-datapath /opt/ml/input/data/train/data/mxnet/mscoco/ \
+python train_mask_rcnn.py --train-datapath /opt/ml/input/data/train/data/mxnet/mscoco/ \
 --val-datapath /opt/ml/input/data/train/data/mxnet/mscoco/ \
 --num-workers 4 \
 --smdataparallel \
@@ -7,9 +7,9 @@ python train_mask_rcnn_herring.py --resume mask_rcnn_fpn_resnet50_v1b_coco_0011_
 --epochs 4 \
 --log-interval 100 \
 --val-interval 1 \
---batch-size 128 \
+--batch-size 32 \
 --use-fpn \
---lr 0.16 \
+--lr 0.08 \
 --lr-warmup-factor 0.001 \
 --lr-warmup 1600 \
 --static-alloc \

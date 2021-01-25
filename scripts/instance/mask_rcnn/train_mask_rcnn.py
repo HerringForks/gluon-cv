@@ -317,7 +317,7 @@ def get_dataloader(net, train_dataset, val_dataset, train_transform, val_transfo
     """Get dataloader."""
     train_bfn = batchify.MaskRCNNTrainBatchify(net, num_shards_per_process)
     train_sampler = \
-        gcv.nn.sampler.SplitSortedBucketSampler(train_dataset.get_im_aspect_ratio(),
+        gcv.data.sampler.SplitSortedBucketSampler(train_dataset.get_im_aspect_ratio(),
                                                 batch_size,
                                                 num_parts=dist.size() if args.smdataparallel else 1,
                                                 part_index=dist.rank() if args.smdataparallel else 0,
@@ -410,15 +410,18 @@ def validate(net, val_data, async_eval_processes, ctx, eval_metric, logger, epoc
             det_masks.append(masks)
             det_infos.append(im_info)
         # update metric
-        for det_bbox, det_id, det_score, det_mask, det_info in zip(det_bboxes, det_ids, det_scores,
+        for det_bbox_og, det_id_og, det_score_og, det_mask_og, det_info_og in zip(det_bboxes, det_ids, det_scores,
                                                                    det_masks, det_infos):
-            for i in range(det_info.shape[0]):
+            print(f'det info: {det_info_og.shape}')
+            print('bbox shape')
+            print(det_bbox_og.shape)
+            for i in range(det_info_og.shape[0]):
                 # numpy everything
-                det_bbox = det_bbox[i].asnumpy()
-                det_id = det_id[i].asnumpy()
-                det_score = det_score[i].asnumpy()
-                det_mask = det_mask[i].asnumpy()
-                det_info = det_info[i].asnumpy()
+                det_bbox = det_bbox_og[i].asnumpy()
+                det_id = det_id_og[i].asnumpy()
+                det_score = det_score_og[i].asnumpy()
+                det_mask = det_mask_og[i].asnumpy()
+                det_info = det_info_og[i].asnumpy()
                 # filter by conf threshold
                 im_height, im_width, im_scale = det_info
                 valid = np.where(((det_id >= 0) & (det_score >= 0.001)))[0]
@@ -542,6 +545,8 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
             metric.reset()
         tic = time.time()
         btic = time.time()
+        speed = []
+        avg_batch_speed = 0
         train_data_iter = iter(train_data)
         next_data_batch = next(train_data_iter)
         next_data_batch = split_and_load(next_data_batch, ctx_list=ctx)
@@ -587,14 +592,18 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
             if (not args.smdataparallel or dist.rank() == 0) and args.log_interval \
                     and not (i + 1) % args.log_interval:
                 msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics + metrics2])
+                batch_speed = args.log_interval * args.batch_size / (time.time() - btic)
+                speed.append(batch_speed)
                 logger.info('[Epoch {}][Batch {}], Speed: {:.3f} samples/sec, {}'.format(
-                    epoch, i, args.log_interval * args.batch_size / (time.time() - btic), msg))
+                    epoch, i, batch_speed, msg))
                 btic = time.time()
+        if speed:
+            avg_batch_speed = sum(speed)/len(speed)
         # validate and save params
         if (not args.smdataparallel) or dist.rank() == 0:
             msg = ','.join(['{}={:.3f}'.format(*metric.get()) for metric in metrics])
-            logger.info('[Epoch {}] Training cost: {:.3f}, {}'.format(
-                epoch, (time.time() - tic), msg))
+            logger.info('[Epoch {}] Training cost: {:.3f}, Speed: {:.3f} samples/sec, {}'.format(
+                epoch, (time.time() - tic), avg_batch_speed, msg))
         if not (epoch + 1) % args.val_interval:
             # consider reduce the frequency of validation to save time
             validate(net, val_data, async_eval_processes, ctx, eval_metric, logger, epoch, best_map,
@@ -706,13 +715,13 @@ if __name__ == '__main__':
             param.initialize()
     net.collect_params().reset_ctx(ctx)
 
-    if args.amp:
-        # Cast both weights and gradients to 'float16'
-        net.cast('float16')
-        # This layers doesn't support type 'float16'
-        net.collect_params('.*batchnorm.*').setattr('dtype', 'float32')
-        net.collect_params('.*normalizedperclassboxcenterencoder.*').setattr('dtype', 'float32')
-
+#    if args.amp:
+#        # Cast both weights and gradients to 'float16'
+#        net.cast('float16')
+#        # This layers doesn't support type 'float16'
+#        net.collect_params('.*batchnorm.*').setattr('dtype', 'float32')
+#        net.collect_params('.*normalizedperclassboxcenterencoder.*').setattr('dtype', 'float32')
+#
     # Get the MPI worker communicator for distributed validation
     worker_comm = dist.get_worker_comm()
 
@@ -735,7 +744,8 @@ if __name__ == '__main__':
         MaskRCNNDefaultValTransform,
         batch_size, len(ctx), args)
 
-    dist.attach_dataloader([train_data, val_data])
+#    dist.attach_dataloader([train_data, val_data])
 
     # training
     train(net, train_data, val_data, eval_metric, batch_size, ctx, logger, args)
+
