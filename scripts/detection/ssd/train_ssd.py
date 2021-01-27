@@ -93,7 +93,7 @@ def parse_args():
                         help='Use smdistributed.dataparallel MXNet for distributed training. Must be run with OpenMPI. '
                         '--gpus is ignored when using --smdataparallel.')
 
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
     return args
 
 def get_dataset(dataset, args):
