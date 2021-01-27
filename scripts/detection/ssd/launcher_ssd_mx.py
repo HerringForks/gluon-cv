@@ -26,6 +26,10 @@ if __name__ == '__main__':
     parser.add_argument('--mode', type=str, default='perf')
     args, _ = parser.parse_known_args()
 
+    subnets=['subnet-02da219d37e84a7af']
+    security_group_ids=['sg-01a3bc0056722f294']
+    file_system_id='fs-0c3b35d305333fa2e'
+
     SM_DATA_ROOT = '/opt/ml/input/data/train'
 
     hyperparameters={
