@@ -26,7 +26,7 @@ from gluoncv.utils.metrics.accuracy import Accuracy
 from mxnet.contrib import amp
 
 try:
-    import horovod as dist
+    import horovod.mxnet as dist
 except ImportError:
     dist = None
 
