@@ -125,7 +125,7 @@ def get_dataloader(net, train_dataset, val_dataset, data_shape, batch_size, num_
     anchors = anchors.as_in_context(mx.cpu())
     batchify_fn = Tuple(Stack(), Stack(), Stack())  # stack image, cls_targets, box_targets
     train_sampler = \
-        gcv.nn.sampler.SplitSortedBucketSampler(train_dataset.get_im_aspect_ratio(),
+        gcv.data.sampler.SplitSortedBucketSampler(train_dataset.get_im_aspect_ratio(),
                                                 batch_size,
                                                 num_parts=dist.size() if args.smdataparallel else 1,
                                                 part_index=dist.rank() if args.smdataparallel else 0,
@@ -426,8 +426,6 @@ if __name__ == '__main__':
         train_data, val_data = get_dataloader(
             async_net, train_dataset, val_dataset, args.data_shape, batch_size, args.num_workers, ctx[0])
 
-
-    dist.attach_dataloader([train_data, val_data])
     # training
     train(net, train_data, val_data, eval_metric, ctx, args)
 
