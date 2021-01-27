@@ -35,9 +35,9 @@ if __name__ == '__main__':
         "data-shape": 512,
         "dataset": "coco",
         "lr": 0.016,
-        "epochs": instance_count * 2,
+        "epochs": count * 2,
         "smdataparallel": "",
-        "batch-size": instance_count * 256,
+        "batch-size": count * 256,
         "log-interval": 10,
         "val-interval": 50,
         "save-interval": 50
