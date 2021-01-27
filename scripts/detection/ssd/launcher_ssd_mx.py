@@ -21,8 +21,8 @@ if __name__ == '__main__':
     sagemaker_session = sagemaker.session.Session(boto_session=session)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--instance-type', type=str, default='ml.p3dn.24xlarge')
-    parser.add_argument('--instance-count', type=int, default=8)
+    parser.add_argument('--type', type=str, default='ml.p3dn.24xlarge')
+    parser.add_argument('--count', type=int, default=8)
     parser.add_argument('--mode', type=str, default='perf')
     args, _ = parser.parse_known_args()
 
