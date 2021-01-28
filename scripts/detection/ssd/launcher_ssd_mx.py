@@ -38,6 +38,10 @@ if __name__ == '__main__':
 
     batch_size_per_node = type_to_batch_size[args.type]
 
+    epochs = args.count * 2
+    if args.mode == 'full':
+        epochs = 30
+
     SM_DATA_ROOT = '/opt/ml/input/data/train'
 
     hyperparameters={
@@ -48,8 +52,8 @@ if __name__ == '__main__':
         "dataset": 'coco',
         "lr": 0.016,
         "lr_decay": 0.1,
-        "lr_decay_epoch": '20,25'
-        "epochs": args.count * 2,
+        "lr_decay_epoch": '20,25',
+        "epochs": epochs,
         "smdataparallel": "",
         "batch-size": args.count * batch_size_per_node,
         "log-interval": 10,
