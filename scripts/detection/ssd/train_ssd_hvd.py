@@ -388,7 +388,7 @@ if __name__ == '__main__':
             root = os.path.join(os.environ['MXNET_HOME'], 'models')
         root = os.path.expanduser(root)
         if dist.local_rank() == 0 and not os.path.exists(root):
-            os.makedirs(root)
+            os.makedirs(root, exist_ok=True)
 
     net_name = '_'.join(('ssd', str(args.data_shape), args.network, args.dataset))
     args.save_prefix += net_name

@@ -255,7 +255,7 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
     if args.smdataparallel:
         trainer = dist.DistributedTrainer(
                         net.collect_params(), 'sgd',
-                        {'learning_rate': args.lr, 'wd': args.wd, 'momentum': args.momentum})
+                        {'learning_rate': args.lr, 'wd': args.wd, 'momentum': args.momentum}, bucket_cap_mb=8)
     else:
         trainer = gluon.Trainer(
                     net.collect_params(), 'sgd',
@@ -389,7 +389,7 @@ if __name__ == '__main__':
             root = os.path.join(os.environ['MXNET_HOME'], 'models')
         root = os.path.expanduser(root)
         if dist.local_rank() == 0 and not os.path.exists(root):
-            os.makedirs(root)
+            os.makedirs(root, exist_ok=True)
 
     net_name = '_'.join(('ssd', str(args.data_shape), args.network, args.dataset))
     args.save_prefix += net_name

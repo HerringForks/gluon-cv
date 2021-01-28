@@ -32,6 +32,13 @@ if __name__ == '__main__':
 
     SM_DATA_ROOT = '/opt/ml/input/data/train'
 
+    if args.type == 'ml.p4d.24xlarge':
+        batch_size_per_node = 256
+    elif args.type == 'ml.p3dn.24xlarge':
+        batch_size_per_node = 128
+    else:
+        batch_size_per_node = 64
+
     hyperparameters={
         "dataset-root": '/'.join([SM_DATA_ROOT, 'data/mxnet/mscoco/']),
         "j": 32,
@@ -41,7 +48,7 @@ if __name__ == '__main__':
         "lr": 0.016,
         "epochs": args.count * 2,
         "smdataparallel": "",
-        "batch-size": args.count * 256,
+        "batch-size": args.count * batch_size_per_node,
         "log-interval": 10,
         "val-interval": 50,
         "save-interval": 50
