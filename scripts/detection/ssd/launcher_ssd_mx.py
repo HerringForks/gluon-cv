@@ -30,28 +30,31 @@ if __name__ == '__main__':
     security_group_ids=['sg-01a3bc0056722f294']
     file_system_id='fs-0c3b35d305333fa2e'
 
-    SM_DATA_ROOT = '/opt/ml/input/data/train'
+    type_to_batch_size = {
+        'ml.p4d.24xlarge': 256,
+        'ml.p3dn.24xlarge': 128,
+        'ml.p3.16xlarge': 64
+    }
 
-    if args.type == 'ml.p4d.24xlarge':
-        batch_size_per_node = 256
-    elif args.type == 'ml.p3dn.24xlarge':
-        batch_size_per_node = 128
-    else:
-        batch_size_per_node = 64
+    batch_size_per_node = type_to_batch_size[args.type]
+
+    SM_DATA_ROOT = '/opt/ml/input/data/train'
 
     hyperparameters={
         "dataset-root": '/'.join([SM_DATA_ROOT, 'data/mxnet/mscoco/']),
         "j": 32,
-        "network": "resnet50_v1",
+        "network": 'resnet50_v1',
         "data-shape": 512,
-        "dataset": "coco",
+        "dataset": 'coco',
         "lr": 0.016,
+        "lr_decay": 0.1,
+        "lr_decay_epoch": '20,25'
         "epochs": args.count * 2,
         "smdataparallel": "",
         "batch-size": args.count * batch_size_per_node,
         "log-interval": 10,
-        "val-interval": 50,
-        "save-interval": 50
+        "val-interval": 30,
+        "save-interval": 30
     }
 
     distribution = {'smdistributed':{'dataparallel':{'enabled': True}}}
