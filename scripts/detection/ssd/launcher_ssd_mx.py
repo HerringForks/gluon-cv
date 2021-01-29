@@ -62,7 +62,6 @@ if __name__ == '__main__':
     }
 
     distribution = {'smdistributed':{'dataparallel':{'enabled': True}}}
-    #distribution = {'mpi': {'enabled': True, "custom_mpi_options": "-verbose --NCCL_DEBUG=INFO"}}
 
     estimator = MXNet(entry_point='train_ssd.py',
                     role=role,
