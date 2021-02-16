@@ -93,7 +93,7 @@ def parse_args():
                         help='Use smdistributed.dataparallel MXNet for distributed training. Must be run with OpenMPI. '
                         '--gpus is ignored when using --smdataparallel.')
 
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
     return args
 
 def get_dataset(dataset, args):
@@ -125,7 +125,7 @@ def get_dataloader(net, train_dataset, val_dataset, data_shape, batch_size, num_
     anchors = anchors.as_in_context(mx.cpu())
     batchify_fn = Tuple(Stack(), Stack(), Stack())  # stack image, cls_targets, box_targets
     train_sampler = \
-        gcv.nn.sampler.SplitSortedBucketSampler(train_dataset.get_im_aspect_ratio(),
+        gcv.data.sampler.SplitSortedBucketSampler(train_dataset.get_im_aspect_ratio(),
                                                 batch_size,
                                                 num_parts=dist.size() if args.smdataparallel else 1,
                                                 part_index=dist.rank() if args.smdataparallel else 0,
@@ -255,7 +255,7 @@ def train(net, train_data, val_data, eval_metric, ctx, args):
     if args.smdataparallel:
         trainer = dist.DistributedTrainer(
                         net.collect_params(), 'sgd',
-                        {'learning_rate': args.lr, 'wd': args.wd, 'momentum': args.momentum})
+                        {'learning_rate': args.lr, 'wd': args.wd, 'momentum': args.momentum}, bucket_cap_mb=8)
     else:
         trainer = gluon.Trainer(
                     net.collect_params(), 'sgd',
@@ -389,7 +389,7 @@ if __name__ == '__main__':
             root = os.path.join(os.environ['MXNET_HOME'], 'models')
         root = os.path.expanduser(root)
         if dist.local_rank() == 0 and not os.path.exists(root):
-            os.makedirs(root)
+            os.makedirs(root, exist_ok=True)
 
     net_name = '_'.join(('ssd', str(args.data_shape), args.network, args.dataset))
     args.save_prefix += net_name
@@ -426,8 +426,6 @@ if __name__ == '__main__':
         train_data, val_data = get_dataloader(
             async_net, train_dataset, val_dataset, args.data_shape, batch_size, args.num_workers, ctx[0])
 
-
-    dist.attach_dataloader([train_data, val_data])
     # training
     train(net, train_data, val_data, eval_metric, ctx, args)
 
